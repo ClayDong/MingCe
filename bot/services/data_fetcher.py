@@ -213,6 +213,56 @@ def _fetch_stock_tx():
     return ak.stock_zh_a_spot_tx()
 
 
+def _fetch_mcap_from_tencent(codes: List[str]) -> Dict[str, float]:
+    '''从腾讯行情获取指定股票的总市值（亿元）。
+
+    腾讯 qt.gtimg.cn 返回格式中，字段46（0-indexed=45）= 总市值(亿)。
+    仅对需要市值的少量龙头股调用，避免批量请求。
+    '''
+    if not codes:
+        return {}
+    tx_codes = []
+    code_map = {}
+    for code in codes:
+        code_str = str(code).strip()
+        if code_str.startswith("6"):
+            tx_codes.append(f"sh{code_str}")
+            code_map[f"sh{code_str}"] = code_str
+        elif code_str.startswith(("0", "3")):
+            tx_codes.append(f"sz{code_str}")
+            code_map[f"sz{code_str}"] = code_str
+        elif code_str.startswith(("4", "8")):
+            tx_codes.append(f"bj{code_str}")
+            code_map[f"bj{code_str}"] = code_str
+    if not tx_codes:
+        return {}
+    try:
+        import requests as _req
+        url = f"https://qt.gtimg.cn/q={','.join(tx_codes)}"
+        resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        resp.encoding = "gbk"
+        result = {}
+        for line in resp.text.strip().split(";"):
+            if not line.strip():
+                continue
+            if "=" not in line:
+                continue
+            _, raw = line.split("=", 1)
+            raw = raw.strip().strip('"').strip("'")
+            parts = raw.split("~")
+            if len(parts) >= 46:
+                mcap_str = parts[45].strip()
+                try:
+                    mcap_val = float(mcap_str)
+                    result[code_map.get(parts[2], parts[2])] = mcap_val
+                except (ValueError, IndexError):
+                    pass
+        return result
+    except Exception as e:
+        logger.debug(f"Tencent market cap fetch failed: {e}")
+        return {}
+
+
 def _fetch_etf_em():
     return ak.fund_etf_spot_em()
 
@@ -787,12 +837,13 @@ def get_leading_stocks() -> dict:
         try:
             df_filtered = df_stock.copy()
             df_filtered[chg_col] = pd.to_numeric(df_filtered[chg_col], errors="coerce")
-            
-            if mcap_col:
+
+            have_mcap = bool(mcap_col)
+            if have_mcap:
                 df_filtered[mcap_col] = pd.to_numeric(df_filtered[mcap_col], errors="coerce")
                 min_mcap = 300 * 10**8
                 df_filtered = df_filtered[df_filtered[mcap_col] >= min_mcap].copy()
-            
+
             df_filtered = df_filtered.sort_values(chg_col, ascending=False)
 
             found_headlines = 0
@@ -801,14 +852,26 @@ def get_leading_stocks() -> dict:
                     break
                 name = safe_str(row.get(name_col, ""))
                 change = safe_pct(row.get(chg_col, 0))
-                mcap = safe_float(row.get(mcap_col, 0)) if mcap_col else 0
+                code = safe_str(row.get(code_col, "")) if code_col else ""
+                mcap = safe_float(row.get(mcap_col, 0)) if have_mcap else 0
                 if abs(change) >= 0.5 and name:
                     result.headlines.append({
                         "name": name, "change_pct": change,
                         "market_cap": format_volume(mcap) if mcap else "",
-                        "code": safe_str(row.get(code_col, "")) if code_col else "",
+                        "code": code,
                     })
                     found_headlines += 1
+
+            # 如果新浪没有市值列，从腾讯补充
+            if not have_mcap and result.headlines:
+                codes_to_fetch = [h.get("code", "") for h in result.headlines if h.get("code")]
+                mcap_map = _fetch_mcap_from_tencent(codes_to_fetch) if codes_to_fetch else {}
+                if mcap_map:
+                    for h in result.headlines:
+                        code = h.get("code", "")
+                        if code in mcap_map:
+                            mcap_val = mcap_map[code] * 1e8  # 腾讯返回亿，转元
+                            h["market_cap"] = format_volume(mcap_val) if mcap_val else ""
 
             if not result.headlines:
                 for _, row in df_filtered.head(5).iterrows():
