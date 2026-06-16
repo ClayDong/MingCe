@@ -89,7 +89,10 @@ def safe_float(val, default=0.0) -> float:
 
 def safe_str(val, default="") -> str:
     """安全地将值转为字符串并去除首尾空白。"""
+    import math as _m
     if val is None:
+        return default
+    if isinstance(val, float) and (_m.isnan(val) or _m.isinf(val)):
         return default
     return str(val).strip()
 

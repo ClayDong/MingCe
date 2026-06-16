@@ -1802,7 +1802,8 @@ def get_intraday_comparison() -> dict:
                     result.a_shanghai = f"{chg:+.2f}%"
                 elif "深证" in name:
                     result.a_shenzhen = f"{chg:+.2f}%"
-    except Exception:
+    except Exception as e:
+        logger.debug(f"get_intraday_comparison: failed to fetch A-share index: {e}")
         pass
 
     # 美股（取当前已知值）
@@ -1816,7 +1817,8 @@ def get_intraday_comparison() -> dict:
                     result.us_sp500 = f"{chg:+.2f}%"
                 elif "纳斯达克" in name:
                     result.us_nasdaq = f"{chg:+.2f}%"
-    except Exception:
+    except Exception as e:
+        logger.debug(f"get_intraday_comparison: failed to fetch US stock: {e}")
         pass
 
     # 恒生指数
@@ -1829,7 +1831,8 @@ def get_intraday_comparison() -> dict:
                     chg = safe_pct(row.get("涨跌幅", 0))
                     result.hk_hsi = f"{chg:+.2f}%"
                     break
-    except Exception:
+    except Exception as e:
+        logger.debug(f"get_intraday_comparison: failed to fetch HK stock: {e}")
         pass
 
     # BTC
@@ -1842,7 +1845,8 @@ def get_intraday_comparison() -> dict:
                     chg = safe_pct(row.get("涨跌幅", 0))
                     result.btc = f"{chg:+.2f}%"
                     break
-    except Exception:
+    except Exception as e:
+        logger.debug(f"get_intraday_comparison: failed to fetch BTC: {e}")
         pass
 
     parts = []

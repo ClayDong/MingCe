@@ -14,6 +14,7 @@
 import json
 import time
 import math
+import asyncio
 import httpx
 from typing import Optional
 from datetime import datetime
@@ -24,6 +25,7 @@ from config.settings import get_settings
 settings = get_settings()
 
 _token_cache: dict[str, str | float] = {"token": "", "expire_at": 0}
+_token_lock: "asyncio.Lock" = None
 _http_client: Optional[httpx.AsyncClient] = None
 
 MAX_CARD_CONTENT_LENGTH = 20000
@@ -77,26 +79,32 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 async def get_tenant_token() -> str:
-    now = time.time()
-    if _token_cache["token"] and _token_cache["expire_at"] > now + 120:
-        return _token_cache["token"]
+    global _token_lock
+    if _token_lock is None:
+        _token_lock = asyncio.Lock()
 
-    client = _get_client()
-    resp = await client.post(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        json={
-            "app_id": settings.FEISHU_APP_ID,
-            "app_secret": settings.FEISHU_APP_SECRET,
-        },
-    )
-    data = resp.json()
-    if data.get("code") != 0:
-        logger.error(f"Failed to get tenant token: {data}")
-        raise Exception(f"Feishu auth failed: {data.get('msg')}")
-    _token_cache["token"] = data["tenant_access_token"]
-    _token_cache["expire_at"] = now + data.get("expire", 7200)
-    logger.debug("Feishu tenant token refreshed")
-    return _token_cache["token"]
+    async with _token_lock:
+        now = time.time()
+        # 双检锁：获取锁后再检查一次缓存是否可用
+        if _token_cache["token"] and _token_cache["expire_at"] > now + 120:
+            return _token_cache["token"]
+
+        client = _get_client()
+        resp = await client.post(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            json={
+                "app_id": settings.FEISHU_APP_ID,
+                "app_secret": settings.FEISHU_APP_SECRET,
+            },
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.error(f"Failed to get tenant token: {data}")
+            raise Exception(f"Feishu auth failed: {data.get('msg')}")
+        _token_cache["token"] = data["tenant_access_token"]
+        _token_cache["expire_at"] = now + data.get("expire", 7200)
+        logger.debug("Feishu tenant token refreshed")
+        return _token_cache["token"]
 
 
 async def _post_message(payload: dict, token: str) -> dict:
@@ -279,7 +287,8 @@ def _build_gold_section_card(gm: dict) -> str:
         try:
             ratio = float(gm['gold']) / float(gm['silver'])
             parts.append(f"金银比: {ratio:.1f}")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_build_gold_silver_section_card: failed to compute gold/silver ratio: {e}")
             pass
     return "\n".join(parts) if parts else "*暂无数据*"
 
@@ -330,7 +339,8 @@ def _build_bond_section_card(gm: dict, macro: dict) -> str:
             spread = float(gm['us_10y_bond']) - float(gm['us_2y_bond'])
             flag = "⚠️" if spread < 0 else "✅"
             parts.append(f"利差: {spread:+.2f}% {flag}")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_build_bond_section_card: failed to compute bond spread: {e}")
             pass
     lpr_1y = macro.get("lpr_1y")
     if lpr_1y:

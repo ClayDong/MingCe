@@ -117,7 +117,8 @@ def _count_strategies() -> int:
     try:
         from qlib_vnpy_platform.core.strategies import STRATEGY_REGISTRY
         return len(STRATEGY_REGISTRY)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"_count_strategies: failed to get STRATEGY_REGISTRY: {e}")
         return 18  # 默认值
 
 

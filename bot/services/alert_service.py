@@ -14,7 +14,8 @@ async def send_alert(message: str, level: str = "warning"):
     try:
         from config.settings import get_settings
         settings = get_settings()
-    except Exception:
+    except Exception as e:
+        logger.debug(f"send_alert: failed to import settings: {e}")
         logger.warning(f"ALERT ({level}): {message}")
         return
 
