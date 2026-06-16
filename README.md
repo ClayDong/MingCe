@@ -15,13 +15,13 @@
 
 ## 📋 项目简介
 
-**明策（MingCe）** 是一个面向 A 股投资者的全景投资决策系统。它将**宏观五维分析**、**量化策略信号**和 **LLM 大师兄解读**融合到飞书群聊中，每天 4 个时段自动推送，解决散户「信息过载」和「决策困难」的核心痛点。
+**明策（MingCe）** 是一个面向 A 股投资者的全景投资决策系统。它将**宏观五维分析**、**量化策略信号**和 **LLM 大师兄解读**融合到飞书群聊中，每天 5 个时段自动推送，解决散户「信息过载」和「决策困难」的核心痛点。
 
 ### 核心能力
 
 | 能力 | 说明 |
 |:-----|:------|
-| 🗞️ **多维日报** | 08:00→09:10→11:35→15:10 四个时段，金/油/汇/债/G 五维全覆盖 |
+| 🗞️ **多维日报** | 08:00→09:10→11:35→15:10→15:35 五个时段，金/油/汇/债/G 五维全覆盖 |
 | 📈 **策略信号** | 18 个量化策略，覆盖趋势/均值回归/动量/波动率/轮动/情绪等 |
 | 🧠 **AI 解读** | LLM 基于大师兄经济分析框架，三层传导（宏观→行业→个股） |
 | 🛡️ **三级风控** | 单股上限30% / 日亏3%预警5%熔断 / T+1限制 |
@@ -85,9 +85,9 @@
 git clone git@github.com:ClayDong/MingCe.git
 cd MingCe
 
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env，填写飞书 App ID/Secret、LLM API Key 等
+# 2. 配置环境变量（.env 放 bot/ 下）
+cd bot && cp .env.example .env
+# 编辑 bot/.env，填写飞书 App ID/Secret、LLM API Key 等
 
 # 3. 安装依赖
 # bot（主系统）
@@ -100,12 +100,12 @@ cd engine && pip install -r requirements.txt && cd ..
 ### 启动
 
 ```bash
-# 方式一：启动策略微服务 + 主系统
-cd engine && bash run_signal_service.sh &    # 策略服务 :8765
+# 方式一：先启动策略微服务，再启动主系统（推荐）
+cd engine && bash run_signal_service.sh &    # 策略微服务 :8765
 cd bot && python3 run_server.py              # 主系统 :8000
 
-# 方式二：直接启动（含 subprocess 回退）
-cd bot && python3 run_server.py
+# 方式二：直接启动主系统（含 subprocess 回退，自动拉起引擎）
+cd bot && python3 run_server.py              # 主系统 :8000
 
 # 验证
 curl http://localhost:8000/health
@@ -168,14 +168,14 @@ MingCe/
 │   │   └── decision_engine.py # 决策引擎
 │   ├── models/
 │   │   └── schemas.py         # Pydantic 数据模型
-│   ├── tests/                 # 133 个测试用例
+│   ├── tests/                 # 143 个测试用例
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── requirements-lock.txt
 ├── engine/                    # 策略引擎
 │   ├── qlib_vnpy_platform/
 │   │   └── core/
-│   │       ├── strategies.py           # 29 个策略（原始）
+│   │       ├── strategies.py           # 18 个策略（原始）
 │   │       ├── strategies_optimized.py # 18 个核心策略（优化版）
 │   │       ├── main_engine.py          # 主引擎
 │   │       ├── signal_router.py        # 信号融合
@@ -187,8 +187,11 @@ MingCe/
 │   ├── run_signal_service.sh
 │   └── requirements.txt
 ├── docs/
-│   ├── 产品文档.md
-│   └── 技术文档.md
+│   ├── architecture.md
+│   ├── setup.md
+│   ├── api.md
+│   ├── deployment.md
+│   └── reviews/
 ├── .env.example              # 环境变量模板
 ├── .gitignore
 └── README.md
@@ -224,7 +227,7 @@ Level 3: Rule-based      → MA交叉 + 布林带 + RSI
 ```bash
 cd bot
 python3 -m pytest tests/ -v
-# 133 passed
+# 143 passed
 ```
 
 ---
@@ -254,9 +257,12 @@ docker run -d --name mingce \
 | `FEISHU_APP_ID` | ✅ | 飞书应用 App ID |
 | `FEISHU_APP_SECRET` | ✅ | 飞书应用 App Secret |
 | `FEISHU_CHAT_ID` | ✅ | 推送目标群 Chat ID |
-| `LLM_BASE_URL` | ✅ | LLM API 地址 |
-| `LLM_MODEL` | ✅ | LLM 模型名 |
+| `LLM_BASE_URL` | ✅ | LLM API 地址（如 https://api.siliconflow.cn） |
+| `LLM_MODEL` | ✅ | LLM 模型名（如 Qwen/Qwen2.5-72B-Instruct） |
 | `LLM_API_KEY` | ✅ | LLM API 密钥 |
+| `SIGNAL_SERVICE_URL` | ❌ | 策略微服务地址，默认 http://localhost:8765 |
+| `DATABASE_URL` | ❌ | 数据库连接串，默认 SQLite 本地文件 |
+| `LOG_LEVEL` | ❌ | 日志级别，默认 INFO |
 | `MAKINGMONEY_DIR` | ❌ | 策略引擎路径，缺省自动推算 |
 
 ---
