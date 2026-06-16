@@ -242,6 +242,30 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+@app.get("/")
+async def root():
+    """根路径欢迎页，返回服务基本信息与可用端点。"""
+    return {
+        "service": "明策 (MingCe) — 全景投资决策系统",
+        "version": settings.VERSION,
+        "status": "running",
+        "docs": "/docs",
+        "redoc": "/redoc",
+        "openapi": "/openapi.json",
+        "endpoints": {
+            "health": "/health",
+            "metrics": "/metrics",
+            "strategy_signals": "/api/strategy-signals",
+            "report_generate": "/api/report/generate",
+            "report_latest": "/api/report/latest",
+            "task_status": "/api/task/{task_id}",
+            "data_quality": "/api/data-quality/status",
+            "fund_monitor_run": "/api/fund-monitor/run",
+            "fund_monitor_config": "/api/fund-monitor/config",
+        },
+    }
+
+
 @app.get("/health")
 async def health():
     """健康检查接口（带详细组件状态）。"""

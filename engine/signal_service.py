@@ -203,6 +203,23 @@ async def startup_event():
         logger.warning(f"⚠️ 策略引擎预热失败（服务仍可启动，首次请求会重试）: {e}")
 
 
+@app.get("/")
+async def root():
+    """根路径欢迎页，返回服务基本信息与可用端点。"""
+    return {
+        "service": "MakingMoney 策略信号服务",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/docs",
+        "redoc": "/redoc",
+        "openapi": "/openapi.json",
+        "endpoints": {
+            "health": "/health",
+            "analyze": "/analyze",
+        },
+    }
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查端点"""
