@@ -202,7 +202,7 @@ async def startup_event():
         logger.warning(f"⚠️ 策略引擎预热失败（服务仍可启动，首次请求会重试）: {e}")
 
 
-@app.post("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查端点"""
     engine_ok = _engine_instance is not None

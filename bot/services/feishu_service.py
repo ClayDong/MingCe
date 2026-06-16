@@ -782,8 +782,9 @@ def build_detail_card(data: dict) -> dict:
     footer = (
         "---\n"
         f"📈 数据更新: {update_time}\n"
-        f"📌 v2.0 | 收盘 | 金油汇债G五维框架\n"
-        "⚠️ 不构成投资建议"
+        f"📌 v2.0 | 明策智能助手\n"
+        "⚠️ 本报告由AI生成，仅供参考，不构成投资建议\n"
+        "💬 @机器人发送「帮助」查看全部指令"
     )
     sections.append(footer)
 

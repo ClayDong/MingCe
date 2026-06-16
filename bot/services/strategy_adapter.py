@@ -131,10 +131,11 @@ class StrategySignalAdapter:
                 if rows:
                     return [r["symbol"] for r in rows]
         except Exception as e:
-            logger.debug(f"读取自选股列表失败: {e}")
+            logger.warning(f"读取自选股列表失败: {e}")
 
-        # 默认自选股
-        return ["SZ002594", "SH600519", "SZ300750"]
+        # 无自选股时返回空列表，上层调用方处理空信号
+        logger.warning("⚠️ 无自选股数据(数据库不存在或无记录)，策略信号将为空")
+        return []
 
     # ── subprocess 调用（回退） ─────────────────────────
 

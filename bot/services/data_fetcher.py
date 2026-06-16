@@ -295,7 +295,7 @@ def get_market_overview() -> dict:
     target_indices = set(settings.TARGET_INDICES)
     found_indices = set()
 
-    df_idx = _try_sources(_fetch_index_sina, _fetch_index_tencent, _fetch_index_em, _fetch_index_history)
+    df_idx = _try_sources(_fetch_index_sina, _fetch_index_tencent, _fetch_index_em)
     if df_idx is not None:
         name_col = _find_column(df_idx, ["名称", "name", "指数名称"])
         price_col = _find_column(df_idx, ["最新价", "price", "最新", "close"])
@@ -338,7 +338,7 @@ def get_market_overview() -> dict:
     for name in target_indices - found_indices:
         logger.warning(f"Index not found in primary sources: {name}, trying history...")
         try:
-            df = _fetch_index_history()
+            df = _fetch_index_history(name)
             if df is not None:
                 for _, row in df.iterrows():
                     row_name = safe_str(row.get("名称", ""))
@@ -1062,6 +1062,8 @@ def get_global_macro() -> dict:
     result.highlights = unique_highlights
 
     logger.info(f"Global macro: gold={result.gold}, oil={result.wti_oil}, usd={result.usd_index}, bdi={result.bdi}")
+    # 扩展：VIX/BDI/日经/白银/2Y美债
+    _extend_global_macro(result)
     return result.model_dump()
 
 
@@ -1777,26 +1779,6 @@ def _extend_global_macro(result):
     if result.usd_jpy:
         result.highlights.append(f"USD/JPY: {result.usd_jpy}")
 
-
-# ── 覆写 get_global_macro（在现有基础上扩展） ──
-
-# 保留原 get_global_macro 装饰器不变，这里用猴子补丁方式
-# 在 imports 之后覆盖原有的 get_global_macro
-
-_ORIG_GET_GLOBAL_MACRO = get_global_macro
-
-
-@_cached("global_macro", ttl_seconds=settings.CACHE_TTL_GLOBAL, module_name="global_macro")
-@retry(max_retries=2, delay=1.0, backoff=2.0)
-def get_global_macro() -> dict:
-    """全球宏观变量（扩展版）：原 + VIX/BDI/日经/汇率篮子/白银/2Y美债。"""
-    global _ORIG_GET_GLOBAL_MACRO
-    # 调用原函数获取基础数据
-    data = _ORIG_GET_GLOBAL_MACRO()
-    from models.schemas import GlobalMacroData
-    result = GlobalMacroData(**data)
-    _extend_global_macro(result)
-    return result.model_dump()
 
 
 # ── 9. 跨市场比价 ──────────────────────────────────

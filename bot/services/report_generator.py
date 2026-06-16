@@ -31,11 +31,13 @@ from config.settings import get_settings
 settings = get_settings()
 TRADING_DAYS = (0, 1, 2, 3, 4)
 
-# 导入中国法定节假日
+# 交易日检测：使用 chinesecalendar（自动更新至2027+）替代硬编码节假日
 try:
-    from app.main import _CHINESE_HOLIDAYS
+    from chinese_calendar import is_holiday as _is_chinese_holiday
 except ImportError:
-    _CHINESE_HOLIDAYS = set()
+    # 降级：仅周末判断
+    _is_chinese_holiday = None
+    logger.warning("chinesecalendar 未安装，仅靠周末判断交易日")
 
 # 去重存储
 _sent_reports = {}
@@ -43,10 +45,14 @@ _SEND_COOLDOWN_MINUTES = 10
 
 
 def _is_trading_day() -> bool:
-    today = date.today().isoformat()
-    if today in _CHINESE_HOLIDAYS:
+    today = date.today()
+    # 周末
+    if today.weekday() not in TRADING_DAYS:
         return False
-    return date.today().weekday() in TRADING_DAYS
+    # 中国法定节假日
+    if _is_chinese_holiday and _is_chinese_holiday(today):
+        return False
+    return True
 
 
 # ═══════════════════════════════════════════════════════
