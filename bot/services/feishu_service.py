@@ -598,6 +598,77 @@ def build_alert_card(alerts: list[dict]) -> dict:
     }
 
 
+# ── 策略信号翻译 ──────────────────────────────────
+_SIGNAL_EXPLAIN = {
+    "RSI超卖": "超跌反弹左侧机会",
+    "RSI超买": "短期过热注意回调",
+    "MACD金叉": "短期趋势转多",
+    "MACD死叉": "短期趋势转空",
+    "MA5金叉MA20": "均线多头排列",
+    "MA5死叉MA20": "均线空头排列",
+    "布林带下轨": "触及下轨支撑",
+    "布林带上轨": "触及上轨压力",
+    "放量突破": "放量突破资金进场",
+    "放量下跌": "放量下跌资金出逃",
+}
+
+
+def _translate_signal(strategy_name: str, signal_dir: int) -> str:
+    """将量化策略名翻译为通俗易懂的投资语言。"""
+    explain = _SIGNAL_EXPLAIN.get(strategy_name)
+    if explain:
+        return explain
+    if signal_dir > 0:
+        return f"{strategy_name}（看多）"
+    return f"{strategy_name}（看空）"
+
+
+def _build_signal_summary(name: str, sym: str, price: float, change_pct: float, sigs: list) -> list:
+    """将一只股票的策略信号转为一行综合结论+操作建议。"""
+    lines = []
+    buy = sum(1 for s in sigs if s.get("signal", 0) > 0)
+    sell = sum(1 for s in sigs if s.get("signal", 0) < 0)
+    total = buy + sell
+    if total == 0:
+        return lines
+
+    # 综合方向
+    net = buy - sell
+    if net > 0:
+        dir_icon, direction = "📈", "偏多"
+    elif net < 0:
+        dir_icon, direction = "📉", "偏空"
+    else:
+        dir_icon, direction = "➡", "中性"
+
+    # 加权信号强度
+    weighted = sum((1 if s.get("signal", 0) > 0 else -1) * s.get("signal_strength", 0.5) for s in sigs)
+    avg_strength = weighted / total
+    strength_pct = abs(avg_strength)
+
+    # 操作建议
+    if avg_strength > 0.4:
+        suggestion = "可关注加仓"
+    elif avg_strength > 0.1:
+        suggestion = "持有观望"
+    elif avg_strength < -0.4:
+        suggestion = "注意减仓"
+    elif avg_strength < -0.1:
+        suggestion = "减仓锁定"
+    else:
+        suggestion = "维持现状"
+
+    # 组装
+    chg_icon = "🟢" if change_pct >= 0 else "🔴"
+    lines.append(f"{chg_icon} **{name}** ({sym}) {price:.2f}（{change_pct:+.2f}%）")
+    lines.append(f"  {dir_icon} 综合{direction}（{buy}看多/{sell}看空）  强度{strength_pct:.0%}")
+    for s in sigs[:3]:
+        act = "🟢" if s.get("signal", 0) > 0 else "🔴"
+        lines.append(f"  {act} {_translate_signal(s.get('strategy', ''), s.get('signal', 0))}")
+    lines.append(f"  💡 **{suggestion}**")
+    return lines
+
+
 def build_detail_card(data: dict) -> dict:
     """五维框架日报详情卡片（v2.0）。"""
     report_date = data.get("report_date", "")
@@ -680,17 +751,11 @@ def build_detail_card(data: dict) -> dict:
             name = sig_data.get("name", sym)
             price = sig_data.get("price", 0)
             change_pct = sig_data.get("change_pct", 0)
-            icon = "🟢" if change_pct >= 0 else "🔴"
-            buy_count = sum(1 for s in sigs if s.get("signal", 0) > 0)
-            sell_count = sum(1 for s in sigs if s.get("signal", 0) < 0)
-            signal_lines.append(f"{icon} **{name}** ({sym}) {price:.2f} ({change_pct:+.2f}%)  🟢{buy_count}  🔴{sell_count}")
-            # 显示前3个信号详情
-            for s in sigs[:3]:
-                action_icon = "🟢" if s.get("signal", 0) > 0 else "🔴"
-                strength = s.get("signal_strength", 0)
-                bar = "▓" * min(int(strength * 10), 10) + "░" * (10 - min(int(strength * 10), 10))
-                signal_lines.append(f"  {action_icon} {s['strategy']} {bar} {strength:.0%}")
-        sections.append("## 🎯 策略信号\n" + "\n".join(signal_lines))
+            summary = _build_signal_summary(name, sym, price, change_pct, sigs)
+            if summary:
+                signal_lines.extend(summary)
+        if signal_lines:
+            sections.append("## 🎯 策略信号（自选股）\n" + "\n".join(signal_lines))
 
     # 8. 宏观数据
     macro_parts = []
