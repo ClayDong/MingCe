@@ -222,18 +222,21 @@ def _fetch_mcap_from_tencent(codes: List[str]) -> Dict[str, float]:
     if not codes:
         return {}
     tx_codes = []
-    code_map = {}
+    bare_to_prefixed = {}  # 裸代码 → 原输入代码（带前缀）
     for code in codes:
         code_str = str(code).strip()
-        if code_str.startswith("6"):
+        if code_str.startswith(("sh", "sz", "bj")):
+            tx_codes.append(code_str)
+            bare_to_prefixed[code_str[2:]] = code_str  # bj920083 → 920083→bj920083
+        elif code_str.startswith("6"):
             tx_codes.append(f"sh{code_str}")
-            code_map[f"sh{code_str}"] = code_str
+            bare_to_prefixed[code_str] = f"sh{code_str}"  # 600519 → sh600519
         elif code_str.startswith(("0", "3")):
             tx_codes.append(f"sz{code_str}")
-            code_map[f"sz{code_str}"] = code_str
-        elif code_str.startswith(("4", "8")):
+            bare_to_prefixed[code_str] = f"sz{code_str}"
+        elif code_str.startswith(("4", "8", "9")):
             tx_codes.append(f"bj{code_str}")
-            code_map[f"bj{code_str}"] = code_str
+            bare_to_prefixed[code_str] = f"bj{code_str}"
     if not tx_codes:
         return {}
     try:
@@ -254,7 +257,9 @@ def _fetch_mcap_from_tencent(codes: List[str]) -> Dict[str, float]:
                 mcap_str = parts[45].strip()
                 try:
                     mcap_val = float(mcap_str)
-                    result[code_map.get(parts[2], parts[2])] = mcap_val
+                    prefixed = bare_to_prefixed.get(parts[2])
+                    if prefixed:
+                        result[prefixed] = mcap_val
                 except (ValueError, IndexError):
                     pass
         return result
