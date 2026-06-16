@@ -6,23 +6,51 @@ import sys
 import time
 import signal
 import subprocess
-import logging
 from pathlib import Path
 from datetime import datetime
 
+from loguru import logger as log
+
 BASE_DIR = Path(__file__).parent
 LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "supervisor.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+# 配置 loguru 日志轮转
+# 移除默认的 stderr handler，用我们配置的替代
+log.remove()
+log.add(
+    LOG_DIR / "supervisor_{time:YYYYMMDD}.log",
+    rotation="10 MB",
+    retention="30 days",
+    compression="gz",
+    encoding="utf-8",
+    level="INFO",
+    backtrace=True,
+    diagnose=False,
 )
-log = logging.getLogger("supervisor")
+log.add(
+    sys.stderr,
+    colorize=True,
+    format="<green>{time:HH:mm:ss}</green> [<level>{level}</level>] <level>{message}</level>",
+    level="INFO",
+)
+
+# 定期清理旧 uvicorn 日志（保留 30 天）
+def _clean_old_uvicorn_logs():
+    """清理超过 30 天的旧 uvicorn 日志文件。"""
+    cutoff = datetime.now().timestamp() - 30 * 86400
+    removed = 0
+    for f in LOG_DIR.glob("uvicorn_*.log"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+                removed += 1
+        except (OSError, PermissionError):
+            pass
+    if removed > 0:
+        log.info(f"已清理 {removed} 个旧日志文件")
+
+_clean_old_uvicorn_logs()
 
 
 def start_server():
@@ -41,12 +69,12 @@ def start_server():
     log.info(f"🚀 启动服务器: {' '.join(cmd)}")
     log.info(f"📝 日志: {log_file}")
 
-    # 检测 DeepSeek API 密钥（从环境变量）
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if deepseek_key:
-        log.info("🔑 DeepSeek API Key 已从环境变量加载")
+    # 检测 LLM API 密钥（从环境变量）
+    llm_key = os.environ.get("LLM_API_KEY", "")
+    if llm_key:
+        log.info("🔑 LLM API Key 已从环境变量加载")
     else:
-        log.warning("⚠️ DEEPSEEK_API_KEY 环境变量未设置，LLM 将不可用")
+        log.warning("⚠️ LLM_API_KEY 环境变量未设置，LLM 将不可用")
 
     proc = subprocess.Popen(
         cmd,

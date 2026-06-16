@@ -93,13 +93,13 @@ class RSIStrategy(BaseStrategy):
             prev_rsi = df["rsi"].iloc[i - 1]
 
             if prev_rsi <= self.oversold and rsi_val > self.oversold:
+                raw_strength = (self.oversold + (50 - self.oversold) / 2 - rsi_val) / 50
                 df.iloc[i, df.columns.get_loc("signal")] = 1
-                df.iloc[i, df.columns.get_loc("signal_strength")] = (self.oversold + (50 - self.oversold) / 2 - rsi_val) / 50
+                df.iloc[i, df.columns.get_loc("signal_strength")] = max(0.0, min(1.0, abs(raw_strength)))
             elif prev_rsi >= self.overbought and rsi_val < self.overbought:
+                raw_strength = (rsi_val - (50 + (self.overbought - 50) / 2)) / 50
                 df.iloc[i, df.columns.get_loc("signal")] = -1
-                df.iloc[i, df.columns.get_loc("signal_strength")] = (rsi_val - (50 + (self.overbought - 50) / 2)) / 50
-
-            df.iloc[i, df.columns.get_loc("signal_strength")] = max(0, min(1, abs(df.iloc[i, df.columns.get_loc("signal_strength")])))
+                df.iloc[i, df.columns.get_loc("signal_strength")] = max(0.0, min(1.0, abs(raw_strength)))
 
         return df
 
@@ -224,7 +224,12 @@ class KDJStrategy(BaseStrategy):
 
         low_min = df["low"].rolling(window=self.n).min()
         high_max = df["high"].rolling(window=self.n).max()
-        rsv = (df["close"] - low_min) / (high_max - low_min).replace(0, np.inf) * 100
+        denom = high_max - low_min
+        # 防除零：当价格区间为 0 时，RSV 设为 50（中间值）
+        rsv = ((df["close"] - low_min) / denom.where(denom != 0, np.nan)) * 100
+        # 如果全部是 NaN（所有价格相同），设为 50
+        if rsv.isna().all():
+            rsv = pd.Series(50.0, index=df.index)
 
         df["K"] = rsv.ewm(alpha=1 / self.m1, min_periods=self.m1, adjust=False).mean()
         df["D"] = df["K"].ewm(alpha=1 / self.m2, min_periods=self.m2, adjust=False).mean()

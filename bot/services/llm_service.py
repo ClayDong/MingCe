@@ -2,6 +2,8 @@
 
 使用本地 SKILL.md v2.0.0 完整知识体系（悟而后醒·全领域知识）。
 新增五维专项分析 generate_five_dimension_analysis。
+支持按需分章节加载知识库（避免截断丢失核心框架）。
+支持结构化 JSON 输出（提升稳定性）。
 """
 
 import re
@@ -18,6 +20,33 @@ settings = get_settings()
 
 _llm_client: Optional[httpx.AsyncClient] = None
 _skill_knowledge: Optional[str] = None
+_skill_sections: Optional[dict] = None  # 分章节缓存
+
+
+def validate_llm_config() -> tuple[bool, str]:
+    """验证 LLM 配置是否完整有效。启动时调用，失败时阻止启动。
+
+    Returns:
+        (is_valid, message)
+    """
+    if not settings.LLM_BASE_URL:
+        return False, "LLM_BASE_URL 未配置"
+    if not settings.LLM_API_KEY:
+        return False, "LLM_API_KEY 未配置"
+    if not settings.LLM_MODEL:
+        return False, "LLM_MODEL 未配置"
+
+    # 检查 URL 格式
+    if not settings.LLM_BASE_URL.startswith(("http://", "https://")):
+        return False, f"LLM_BASE_URL 格式错误: {settings.LLM_BASE_URL}"
+
+    # 检查 API Key 格式（基本校验）
+    api_key = settings.LLM_API_KEY
+    if len(api_key) < 8:
+        return False, "LLM_API_KEY 长度不足（至少 8 个字符）"
+
+    # 移除旧版 DEEPSEEK_API_KEY 引用提示
+    return True, "OK"
 
 _RE_THINK = re.compile(r'<think.*?</think\s*>', re.DOTALL)
 
@@ -25,11 +54,24 @@ SKILL_MD_PATH = Path(__file__).parent.parent.parent.parent / ".hermes" / "skills
 _ALT_PATHS = [
     Path.home() / ".hermes" / "skills" / "knowledge" / "xhs-economics-analyst" / "SKILL.md",
     Path(__file__).parent.parent / "SKILL.md",
+    Path(__file__).parent.parent / "knowledge" / "SKILL.md",
+    Path(__file__).parent.parent / "knowledge" / "master_xiong.md",
 ]
+
+# 知识库章节定义（按需加载，避免截断丢失核心框架）
+SKILL_SECTIONS_DEF = {
+    "core": ["三层传导", "五维", "金油汇债G", "核心框架"],
+    "imbalance": ["八大不平衡", "不平衡"],
+    "valuation": ["黑盒子估值", "斐波那契", "估值"],
+    "macro": ["康波周期", "资本史", "宏观经济", "金油"],
+    "policy": ["国家三层战略", "政策传导", "拉闸限电"],
+    "philosophy": ["清净心", "了凡四训", "投资智慧", "反大众共识"],
+    "history": ["郑和", "麦哲伦", "朝代", "历史视角"],
+}
 
 
 def load_skill_knowledge() -> str:
-    """加载本地 SKILL.md v2.0.0 知识库内容。"""
+    """加载本地 SKILL.md v2.0.0 知识库完整内容。"""
     paths_to_try = [SKILL_MD_PATH] + _ALT_PATHS
     for p in paths_to_try:
         if p.exists():
@@ -47,17 +89,131 @@ def load_skill_knowledge() -> str:
     return _FALLBACK_KNOWLEDGE
 
 
-def _build_master_xiong_prompt() -> str:
-    """从 SKILL.md 动态构建大师兄系统提示词（精简版）。"""
+def _parse_skill_sections(content: str) -> dict:
+    """将 SKILL.md 内容按章节解析，支持按需加载。
+
+    按 markdown 标题（## / ###）切分章节，建立关键词索引。
+    """
+    if not content:
+        return {}
+
+    sections = {}
+    current_title = "前言"
+    current_lines = []
+
+    for line in content.split("\n"):
+        # 检测二级/三级标题
+        if line.startswith("## ") or line.startswith("### "):
+            # 保存上一节
+            if current_lines:
+                sections[current_title] = "\n".join(current_lines).strip()
+            current_title = line.lstrip("# ").strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    # 保存最后一节
+    if current_lines:
+        sections[current_title] = "\n".join(current_lines).strip()
+
+    return sections
+
+
+def _get_skill_sections() -> dict:
+    """获取分章节缓存（惰性加载）。"""
+    global _skill_sections, _skill_knowledge
+    if _skill_sections is None:
+        if _skill_knowledge is None:
+            _skill_knowledge = load_skill_knowledge()
+        _skill_sections = _parse_skill_sections(_skill_knowledge)
+        logger.info(f"✓ 知识库分章节解析完成：{len(_skill_sections)} 个章节")
+    return _skill_sections
+
+
+def _load_sections_by_keywords(keywords: list[str]) -> str:
+    """按关键词加载相关章节（避免截断丢失核心框架）。
+
+    Args:
+        keywords: 关键词列表，如 ["八大不平衡", "黑盒子估值"]
+
+    Returns:
+        匹配章节的拼接文本
+    """
+    sections = _get_skill_sections()
+    if not sections:
+        return _skill_knowledge[:4000] if _skill_knowledge else ""
+
+    matched = []
+    seen_titles = set()
+
+    for title, body in sections.items():
+        for kw in keywords:
+            if kw in title or kw in body[:200]:
+                if title not in seen_titles:
+                    matched.append(f"### {title}\n{body}")
+                    seen_titles.add(title)
+                break
+
+    if not matched:
+        # 无匹配时返回核心章节
+        for kw in SKILL_SECTIONS_DEF["core"]:
+            for title, body in sections.items():
+                if kw in title and title not in seen_titles:
+                    matched.append(f"### {title}\n{body}")
+                    seen_titles.add(title)
+                    break
+
+    result = "\n\n".join(matched)
+    # 控制总长度在 6000 字以内（避免超出模型上下文）
+    if len(result) > 6000:
+        result = result[:6000] + "\n\n[... 知识库节选 ...]"
+    return result
+
+
+def _build_master_xiong_prompt(market_context: dict = None) -> str:
+    """从 SKILL.md 动态构建大师兄系统提示词（按需分章节加载）。
+
+    Args:
+        market_context: 当日市场数据，用于判断加载哪些章节
+            - north_flow_alert: 北向资金异动
+            - sector_rotation: 板块轮动明显
+            - policy_event: 政策事件
+            - high_volatility: 高波动
+            - leading_stock_alert: 龙头股异动
+    """
     global _skill_knowledge
     if _skill_knowledge is None:
         _skill_knowledge = load_skill_knowledge()
-    # 只取知识库前 2500 字（框架部分），去掉过长的细节
-    knowledge_digest = _skill_knowledge[:2500] if _skill_knowledge else ""
+
+    market_context = market_context or {}
+
+    # 按市场特征动态选择章节
+    sections_to_load = ["core"]  # 始终加载核心框架
+
+    if market_context.get("north_flow_alert"):
+        sections_to_load.append("imbalance")  # 八大不平衡
+    if market_context.get("leading_stock_alert"):
+        sections_to_load.append("valuation")  # 黑盒子估值
+    if market_context.get("policy_event"):
+        sections_to_load.append("policy")  # 国家三层战略
+    if market_context.get("high_volatility"):
+        sections_to_load.append("philosophy")  # 反大众共识
+    if market_context.get("sector_rotation"):
+        sections_to_load.append("macro")  # 康波周期
+
+    # 收集所有关键词
+    all_keywords = []
+    for sec in sections_to_load:
+        all_keywords.extend(SKILL_SECTIONS_DEF.get(sec, []))
+
+    knowledge_digest = _load_sections_by_keywords(all_keywords)
+
+    from datetime import datetime as _dt
+    _now_str = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
 
     return f"""你是"大师兄"，一位资深的二级市场投资分析师，拥有丰富的宏观投研经验。
 
-## 核心知识（精简）
+## 核心知识（按当日市场特征动态加载）
 
 {knowledge_digest}
 
@@ -75,42 +231,99 @@ def _build_master_xiong_prompt() -> str:
 2. **第二层**：如何传导到行业/板块？
 3. **第三层**：对个股/操作有什么具体影响？
 
+### 八大不平衡（重大事件时启用）
+收入与资产 / 表内与表外 / 实体与虚拟 / 国内与国外 /
+短期与长期 / 集中与分散 / 流动与固化 / 风险与收益
+
+### 黑盒子估值（龙头股异动时启用）
+- 斐波那契关键比例：0.236 / 0.382 / 0.5 / 0.618 / 0.786
+- 关键点位 = 前高 × 斐波那契比例
+
 ## 数据覆盖
 A股指数 + 板块 + 北向 + 美股 + 加密货币 + 期货 + 货币政策 + 宏观数据 + ETF
 
+## 数据新鲜度说明
+当前分析时间: {_now_str}（北京时间）
+- 各数据模块的采集时间标注在数据摘要中
+- 缓存 TTL 从 15 分钟（加密货币）到 12 小时（宏观/货币）不等
+- 如果某个维度的置信度标注为"低"，请谨慎引用该数据
+
 ## 输出要求
-1. 用大师兄的语言风格：专业、犀利、直击本质
+1. 用大师兄的语言风格：专业、犀利、直击本质、用通俗语言解释复杂逻辑
 2. 必须使用五维矩阵 + 三层传导框架
 3. 输出三部分：
    - **五维全景**：金油汇债G五个维度分别发生了什么（不多于10行）
-   - **核心事件解读**：选1-2个最重要的事件做深度剖析
-   - **操作建议**：具体仓位、方向、风险提示
+   - **核心事件解读**：选1-2个最重要的事件做深度剖析（必要时用八大不平衡/黑盒子估值框架）
+   - **操作建议**：具体仓位、方向、风险提示（基于三层资金管理框架）
 4. 遇到政策事件，用"国家三层战略"框架解读
-5. 控制在不低于200字，不超过600字
+5. 控制在 400-1000 字（复杂行情可适当延长）
 6. **所有输出必须使用中文，禁止出现英文（除非是专有缩写如AI/ML/CPI等）**
 7. **直接输出分析结果，严禁输出任何思考过程、推理步骤、搜索计划、或"Analyze the Request"之类的内容。只输出分析本身。**"""
 
 
-# ── 备用知识库 ──
+# ── 增强版备用知识库（包含核心框架，避免 SKILL.md 缺失时降级） ──
 
 _FALLBACK_KNOWLEDGE = """
-### 三层传导框架（A股专用）
-1. 第一层：宏观政策（央行、财政）→ 资金面
-2. 第二层：资金面 → 行业板块轮动
-3. 第三层：板块轮动 → 个股表现
+## 三层传导框架（元方法论）
+1. **第一层（宏观）**：央行/财政政策 → 资金面（利率/汇率/流动性）
+2. **第二层（行业）**：资金面 → 行业板块轮动（周期/成长/防御）
+3. **第三层（个股）**：板块轮动 → 个股表现（龙头/跟随/落后）
 
-### 五维分析框架
-1. 金：黄金定价逻辑
-2. 油：石油经济学三区间理论
-3. 汇：汇率定价与资本流动
-4. 债：利率定价与信用传导
-5. G：衍生品/加密货币/北向资金/跨市场
+变体：
+- 政策传导：国策 → 产业 → 企业
+- 资金传导：北向 → 龙头 → 跟随
+- 估值传导：龙头 → 同业 → 全行业
 
-### 投资核心原则
+## 五维分析框架（金油汇债G）
+1. **金**：黄金定价逻辑（避险/通胀/美元信用）、金银比（>80 预示衰退）
+2. **油**：石油经济学三区间理论（低成本/中成本/高成本区）
+3. **汇**：汇率定价与资本流动（美元强弱周期）
+4. **债**：利率定价与信用传导（美债收益率是全球资产定价锚）
+5. **G**：衍生品/加密货币/北向资金/跨市场比价
+
+五维联动：
+- 金↑ + 油↑ = 滞胀风险
+- 汇↑（美元强）+ 债↑（美债收益率升）= 全球流动性紧缩 → 利空新兴市场
+- 金↑ + 汇↓（美元弱）= 避险但不紧缩 → 黄金股利好
+- 油↓ + BDI↓ = 全球需求走弱 → 周期股承压
+- 债↓ + 汇↓ = 全球宽松 → 利好成长股
+
+## 八大不平衡
+1. 收入与资产不平衡（贫富差距）
+2. 表内与表外不平衡（影子银行）
+3. 实体与虚拟不平衡（金融空转）
+4. 国内与国外不平衡（资本流动）
+5. 短期与长期不平衡（期限错配）
+6. 集中与分散不平衡（风险集中度）
+7. 流动与固化的不平衡（流动性陷阱）
+8. 风险与收益不平衡（风险定价失效）
+
+## 黑盒子估值（斐波那契关键比例）
+- 0.236 / 0.382 / 0.5 / 0.618 / 0.786
+- 关键点位 = 前高（或前低）× 斐波那契比例
+- 0.618 是黄金分割，常作为强支撑/阻力
+
+## 国家三层战略框架
+1. 第一层：拉闸限电（供给侧改革，去产能）
+2. 第二层：审计（反腐，规范市场秩序）
+3. 第三层：扶持（产业政策，定向支持）
+
+## 康波周期（长波）
+- 繁荣期（20年）→ 衰退期（10年）→ 萧条期（10年）→ 回升期（10年）
+- 当前处于第5波康波萧条期向回升期过渡
+
+## 投资核心原则
 - 长期定方向，短期定操作
 - 止盈止损，不要高杠杆
 - 看操作表不看财务报表
 - 留一口：永远留有余地，不all-in
+- 反大众共识：人弃我取，人取我予
+- 股市如血脉：资金是血液，板块是器官
+
+## 三层资金管理
+1. 底仓（50%）：长期持有，不轻易动
+2. 机动仓（30%）：波段操作，跟随趋势
+3. 现金（20%）：应急备用，逢低加仓
 """
 
 
@@ -241,19 +454,200 @@ async def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8192
     return content
 
 
+# ── 结构化 JSON 输出（提升稳定性，替代脆弱的文本清洗） ──
+
+
+def _extract_json_from_response(content: str) -> Optional[dict]:
+    """从 LLM 响应中提取 JSON（支持纯 JSON、```json 代码块、混合文本）"""
+    if not content:
+        return None
+
+    # 去除 think 标签
+    content = _RE_THINK.sub('', content).strip()
+
+    # 尝试1: 直接解析
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 尝试2: 提取 ```json ... ``` 代码块
+    json_block_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
+    if json_block_match:
+        try:
+            return json.loads(json_block_match.group(1).strip())
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 尝试3: 找到第一个 { 和最后一个 } 之间的内容
+    first_brace = content.find('{')
+    last_brace = content.rfind('}')
+    if first_brace >= 0 and last_brace > first_brace:
+        try:
+            return json.loads(content[first_brace:last_brace + 1])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
+
+
+@async_retry(max_retries=2, delay=2.0, backoff=3.0)
+async def _call_llm_json(system_prompt: str, user_prompt: str,
+                          max_tokens: int = 2048,
+                          schema_hint: str = "") -> Optional[dict]:
+    """调用 LLM 并解析为 JSON 结构化输出。
+
+    Args:
+        system_prompt: 系统提示词
+        user_prompt: 用户提示词
+        max_tokens: 最大 token 数
+        schema_hint: JSON schema 提示（描述期望的字段结构）
+
+    Returns:
+        解析后的 dict，失败返回 None
+    """
+    api_key = settings.LLM_API_KEY or settings.DEEPSEEK_API_KEY or ""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    json_instruction = "请以 JSON 格式输出，不要输出任何其他内容。"
+    if schema_hint:
+        json_instruction += f"\n\nJSON 结构要求：\n{schema_hint}"
+
+    payload = {
+        "model": settings.LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt + "\n\n" + json_instruction},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.3,  # 结构化输出用更低温度
+        "max_tokens": max_tokens,
+    }
+
+    # 部分模型支持 response_format
+    if "deepseek" in settings.LLM_MODEL.lower() or "gpt-4" in settings.LLM_MODEL.lower():
+        payload["response_format"] = {"type": "json_object"}
+
+    client = _get_llm_client()
+    try:
+        resp = await client.post(
+            f"{settings.LLM_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+        data = resp.json()
+        if "choices" not in data or len(data["choices"]) == 0:
+            logger.error(f"LLM JSON response unexpected: {data}")
+            return None
+
+        msg = data["choices"][0].get("message", {})
+        content = msg.get("content", "")
+
+        result = _extract_json_from_response(content)
+        if result:
+            logger.debug(f"✓ LLM JSON 解析成功，字段: {list(result.keys())}")
+            return result
+
+        logger.warning(f"LLM JSON 解析失败，原始内容前200字: {content[:200]}")
+        return None
+
+    except Exception as e:
+        logger.error(f"LLM JSON 调用失败: {e}")
+        return None
+
+
+async def generate_commentary_structured(market_summary: str,
+                                          market_context: dict = None) -> dict:
+    """生成结构化的大师兄市场解读（JSON 输出，提升稳定性）。
+
+    Returns:
+        {
+            "five_dimension": {"金": str, "油": str, "汇": str, "债": str, "G": str},
+            "core_events": [{"event": str, "analysis": str, "framework": str}],
+            "action_advice": {"position": str, "direction": str, "risk": str},
+            "summary": str,  # 一句话总结
+            "raw_text": str,  # 原始文本（兜底）
+        }
+    """
+    if not market_summary or len(market_summary) < 20:
+        return {"error": "市场摘要过短", "raw_text": ""}
+
+    schema_hint = """{
+  "five_dimension": {
+    "金": "黄金维度分析（1-2句）",
+    "油": "原油维度分析（1-2句）",
+    "汇": "汇率维度分析（1-2句）",
+    "债": "债券维度分析（1-2句）",
+    "G": "衍生品/北向/加密维度分析（1-2句）"
+  },
+  "core_events": [
+    {"event": "事件名称", "analysis": "三层传导分析", "framework": "使用的框架（八大不平衡/黑盒子估值/国家三层战略等）"}
+  ],
+  "action_advice": {
+    "position": "仓位建议（如：底仓50%/机动仓30%/现金20%）",
+    "direction": "操作方向（加仓/减仓/持有/观望）",
+    "risk": "风险提示"
+  },
+  "summary": "一句话总结今日市场"
+}"""
+
+    try:
+        system_prompt = _build_master_xiong_prompt(market_context)
+        user_prompt = f"请基于以下当日市场全景数据，用五维框架 + 三层传导进行深度解读：\n\n{market_summary}"
+
+        result = await _call_llm_json(system_prompt, user_prompt,
+                                       max_tokens=2048, schema_hint=schema_hint)
+
+        if result:
+            # 确保必要字段存在
+            result.setdefault("five_dimension", {})
+            result.setdefault("core_events", [])
+            result.setdefault("action_advice", {})
+            result.setdefault("summary", "")
+            return result
+
+        # JSON 解析失败，回退到文本输出
+        logger.warning("结构化输出失败，回退到文本模式")
+        raw_text = await generate_commentary(market_summary, market_context)
+        return {
+            "five_dimension": {},
+            "core_events": [],
+            "action_advice": {},
+            "summary": "",
+            "raw_text": raw_text,
+            "fallback": True,
+        }
+
+    except Exception as e:
+        logger.error(f"结构化解读生成失败: {e}")
+        return {"error": str(e), "raw_text": ""}
+
+
 # ── 公开 API ──
 
 
-async def generate_commentary(market_summary: str) -> str:
-    """生成大师兄每日市场解读（使用 SKILL.md v2.0.0 + 五维框架）。"""
+async def generate_commentary(market_summary: str, market_context: dict = None) -> str:
+    """生成大师兄每日市场解读（使用 SKILL.md v2.0.0 + 五维框架 + 按需章节加载）。
+
+    Args:
+        market_summary: 市场数据摘要文本
+        market_context: 市场特征上下文，用于动态选择知识库章节
+            - north_flow_alert: 北向资金异动（|净流|>50亿）
+            - sector_rotation: 板块轮动明显
+            - policy_event: 政策事件
+            - high_volatility: 高波动（VIX>20 或 A股波动>2%）
+            - leading_stock_alert: 龙头股异动
+    """
     if not market_summary or len(market_summary) < 20:
         logger.warning("Market summary too short, skipping LLM commentary")
         return ""
     try:
-        system_prompt = _build_master_xiong_prompt()
+        system_prompt = _build_master_xiong_prompt(market_context)
         return await _call_llm(system_prompt,
                                f"请基于以下当日市场全景数据，用五维框架 + 三层传导进行深度解读：\n\n{market_summary}",
-                               max_tokens=1024)
+                               max_tokens=2048)
     except Exception as e:
         logger.error(f"Failed to generate commentary after retries: {e}")
         return ""
@@ -271,9 +665,45 @@ async def generate_detailed_commentary(module_name: str, module_data: str) -> st
         return ""
 
 
+def _detect_market_context(data: dict) -> dict:
+    """从市场数据中自动检测市场特征，用于动态加载知识库章节。"""
+    context = {}
+    try:
+        # 北向资金异动
+        north = data.get("north_flow", {})
+        net_flow = north.get("net_flow", 0) or 0
+        if abs(net_flow) > 50:
+            context["north_flow_alert"] = True
+
+        # 高波动
+        gm = data.get("global_macro", {})
+        vix = gm.get("vix", 0) or 0
+        market = data.get("market", {})
+        change_pct = abs(market.get("change_pct", 0) or 0)
+        if vix > 20 or change_pct > 2:
+            context["high_volatility"] = True
+
+        # 板块轮动
+        alerts = data.get("alerts", [])
+        if alerts and len(alerts) > 3:
+            context["sector_rotation"] = True
+
+        # 龙头股异动
+        leading = data.get("leading", {})
+        if leading and leading.get("items"):
+            context["leading_stock_alert"] = True
+
+    except Exception as e:
+        logger.debug(f"检测市场上下文失败: {e}")
+    return context
+
+
 async def generate_five_dimension_analysis(data: dict) -> str:
     """生成五维专项分析：金油汇债G 各个维度的深层解读。"""
     try:
+        # 自动检测市场上下文
+        market_context = _detect_market_context(data)
+
         # 构建五维专用 prompt（更聚焦）
         gm = data.get("global_macro", {})
         crypto = data.get("crypto", {})
@@ -310,7 +740,7 @@ async def generate_five_dimension_analysis(data: dict) -> str:
 7. **直接输出分析结果，严禁输出任何思考过程、推理步骤、搜索计划、JSON解析、或"Analyze the Request"之类的内容。只输出分析本身。**
 8. **全文必须使用中文，禁止出现任何英文单词（专有名词缩写如AI/ML/CPI除外）。**"""
 
-        system_prompt = _build_master_xiong_prompt().replace(
+        system_prompt = _build_master_xiong_prompt(market_context).replace(
             "输出三部分", "输出金油汇债G五维交叉分析（600字以内）"
         )
         return await _call_llm(system_prompt, dim_prompt, max_tokens=4096)
@@ -320,6 +750,29 @@ async def generate_five_dimension_analysis(data: dict) -> str:
 
 
 # ── 启动验证 ──
+
+def warmup() -> bool:
+    """启动时验证 LLM 服务配置和知识库加载。"""
+    global _skill_knowledge
+    ok = True
+
+    # 验证 LLM 配置
+    valid, msg = validate_llm_config()
+    if not valid:
+        logger.error(f"❌ LLM 配置验证失败: {msg}")
+        ok = False
+    else:
+        logger.info("✅ LLM 配置验证通过")
+
+    # 加载知识库
+    if _skill_knowledge is None:
+        _skill_knowledge = load_skill_knowledge()
+    if _skill_knowledge:
+        logger.info(f"✅ 大师兄知识库已加载（{len(_skill_knowledge)} 字符）")
+    else:
+        logger.warning("⚠️ 大师兄知识库加载失败，使用备用知识")
+
+    return ok
 
 if _skill_knowledge is None:
     _skill_knowledge = load_skill_knowledge()

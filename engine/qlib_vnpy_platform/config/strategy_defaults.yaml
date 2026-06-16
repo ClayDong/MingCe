@@ -1,0 +1,107 @@
+# 策略默认参数配置
+# 可通过环境变量 STRATEGY_CONFIG_PATH 覆盖
+
+strategies:
+  # ── 趋势跟踪 ──
+  ma_cross:
+    short_window: 5
+    long_window: 20
+    description: "均线交叉：短期均线上穿长期均线买入"
+
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+    description: "MACD 金叉死叉"
+
+  bollinger:
+    window: 20
+    num_std: 2.0
+    description: "布林带突破"
+
+  sar:
+    acceleration: 0.02
+    maximum: 0.2
+    description: "抛物线 SAR"
+
+  # ── 均值回归 ──
+  rsi:
+    period: 14
+    oversold: 30
+    overbought: 70
+    description: "RSI 超买超卖"
+
+  kdj:
+    n: 9
+    m1: 3
+    m2: 3
+    description: "KDJ 金叉死叉"
+
+  mean_reversion:
+    window: 20
+    entry_std: 2.0
+    exit_std: 0.5
+    description: "均值回归"
+
+  mfi:
+    period: 14
+    oversold: 20
+    overbought: 80
+    description: "MFI 资金流"
+
+  # ── 动量 ──
+  momentum:
+    lookback: 20
+    buy_threshold: 0.05
+    sell_threshold: -0.05
+    description: "N 日动量"
+
+  vwap:
+    window: 20
+    entry_threshold: 0.01
+    exit_threshold: 0.005
+    description: "VWAP 成交量加权均价"
+
+  obv:
+    description: "OBV 能量潮"
+
+  # ── 突破 ──
+  dual_thrust:
+    lookback: 4
+    k1: 0.5
+    k2: 0.5
+    description: "Dual Thrust 双轨突破"
+
+  turtle:
+    entry_window: 20
+    exit_window: 10
+    atr_period: 20
+    risk_pct: 0.02
+    description: "海龟交易"
+
+  support_resistance:
+    lookback: 20
+    breakout_pct: 0.02
+    description: "支撑阻力突破"
+
+  # ── 轮动/情绪 ──
+  sector_rotation:
+    momentum_window: 20
+    rotation_threshold: 0.02
+    description: "行业轮动"
+
+  sentiment_cycle:
+    description: "情绪周期"
+
+  dragon_head:
+    limit_up_open_ratio: 0.07
+    hold_max_days: 5
+    stop_loss_pct: 0.05
+    description: "龙头战法"
+
+  # ── 主动交易 ──
+  band_operation:
+    description: "波段操作"
+
+  value_investment:
+    description: "价值投资"

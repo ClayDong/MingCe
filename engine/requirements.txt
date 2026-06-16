@@ -1,37 +1,38 @@
-# MakingMoney 依赖清单
+# MakingMoney 依赖清单（版本锁定）
 # Python 3.12+
 
 # ==================== 核心 ====================
-numpy>=1.24
-pandas>=2.0
-scipy>=1.11
-scikit-learn>=1.3
+numpy==1.26.4
+pandas==2.2.0
+scipy==1.12.0
+scikit-learn==1.4.1.post1
 
 # ==================== Web 服务 ====================
-flask>=3.0
-flask-cors>=4.0
-flask-socketio>=5.3
-gunicorn>=21.2
+flask==3.0.2
+flask-cors==4.0.0
+flask-socketio==5.3.6
+gunicorn==22.0.0
 
 # ==================== 数据源 ====================
-akshare>=1.14
-tushare>=1.4.1  # 备用数据源
-yfinance>=0.2.3  # 美股备用
-requests>=2.31
+akshare==1.18.62
+tushare==1.4.1
+yfinance==0.2.31
+requests==2.31.0
 
-# ==================== 量化框架 ====================
-qlib>=0.9.3  # 因子计算与模型预测
-lightgbm>=4.0  # QLib 依赖
+# ==================== 量化框架（可选） ====================
+# QLib 需要编译，按需安装
+# qlib==0.9.3
+# lightgbm==4.3.0
 
 # ==================== 飞书/通知 ====================
-httpx>=0.27  # 用于中转API调用
+httpx==0.27.0
 
 # ==================== LLM ====================
-openai>=1.0  # 兼容 OpenAI API 的 LLM
+openai==1.13.0
 
 # ==================== 工具 ====================
-loguru>=0.7
-pyyaml>=6.0
-python-dotenv>=1.0
-pydantic>=2.0
-pydantic-settings>=2.0
+loguru==0.7.2
+pyyaml==6.0.1
+python-dotenv==1.0.1
+pydantic==2.7.0
+pydantic-settings==2.2.0

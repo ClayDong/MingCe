@@ -10,6 +10,7 @@
 新增数据源：美股 / 加密货币 / 国内期货 / 货币政策量化 / 跨市场比价
 """
 
+import asyncio
 import json
 from datetime import date, datetime, timedelta
 from loguru import logger
@@ -165,8 +166,25 @@ def _build_derivatives_section(gm: dict, crypto: dict, north: dict, comparison: 
     return "\n".join(parts) if len(parts) > 1 else ""
 
 
+# 数据置信度标签（附加在每个模块后面）
+_DATA_CONFIDENCE = {
+    "market": "[置信度: 高 · 3源回退 · 缓存TTL 5min]",
+    "macro": "[置信度: 高 · 官方发布 · 缓存TTL 12h]",
+    "north_flow": "[置信度: 中 · akshare直连 · 缓存TTL 30min]",
+    "global_macro": "[置信度: 中 · akshare聚合 · 缓存TTL 1h]",
+    "us_market": "[置信度: 中 · 新浪/akshare · 缓存TTL 30min]",
+    "crypto": "[置信度: 中 · akshare+CoinGecko双源 · 缓存TTL 15min]",
+    "futures": "[置信度: 中 · 国内期货实时 · 缓存TTL 30min]",
+    "monetary": "[置信度: 高 · 央行官方数据 · 缓存TTL 12h]",
+    "comparison": "[置信度: 中 · 多市场聚合 · 缓存TTL 30min]",
+    "etf": "[置信度: 中 · akshare实时 · 缓存TTL 30min]",
+    "leading": "[置信度: 低 · 估算值 · 缓存TTL 30min]",
+    "bse": "[置信度: 低 · 估算值 · 缓存TTL 30min]",
+}
+
+
 def _build_market_summary_v2(data: dict) -> str:
-    """构建五维市场摘要文本（用于 LLM 分析）。"""
+    """构建五维市场摘要文本（用于 LLM 分析，含数据置信度标注）。"""
     gm = data.get("global_macro", {})
     market = data.get("market", {})
     north = data.get("north_flow", {})
@@ -180,11 +198,11 @@ def _build_market_summary_v2(data: dict) -> str:
     leading = data.get("leading", {})
     bse = data.get("bse", {})
 
-    lines = ["📊 五维市场全景摘要", f"日期: {data.get('report_date', '')}", f"版本: {data.get('version', '')}"]
+    lines = ["📊 五维市场全景摘要", f"日期: {data.get('report_date', '')}", f"版本: {data.get('version', '')}", f"生成时间: {datetime.now().strftime('%H:%M:%S')}"]
     lines.append("")
 
     # ═══ A 股核心 ═══
-    lines.append("【A股核心】")
+    lines.append("【A股核心】 " + _DATA_CONFIDENCE["market"])
     for idx in market.get("indices", []):
         v = idx.get("value", 0)
         p = idx.get("change_pct", 0)
@@ -200,16 +218,17 @@ def _build_market_summary_v2(data: dict) -> str:
         lines.append(f"  ❄️{s['name']} {s.get('change_pct', 0):+.1f}%")
     lines.append("")
 
-    # ═══ 五维 ═══
+    # ═══ 五维（含数据置信度标签） ═══
     sections = [
-        ("【金】", _build_gold_section(gm=gm)),
-        ("【油】", _build_oil_section(gm=gm, futures=futures)),
-        ("【汇】", _build_fx_section(gm=gm)),
-        ("【债】", _build_bond_section(gm=gm, macro=macro, monetary=monetary)),
-        ("【G】", _build_derivatives_section(gm=gm, crypto=crypto, north=north, comparison=comparison, monetary=monetary)),
+        ("【金】" + " " + _DATA_CONFIDENCE["global_macro"], _build_gold_section(gm=gm)),
+        ("【油】" + " " + _DATA_CONFIDENCE["global_macro"], _build_oil_section(gm=gm, futures=futures)),
+        ("【汇】" + " " + _DATA_CONFIDENCE["global_macro"], _build_fx_section(gm=gm)),
+        ("【债】" + " " + _DATA_CONFIDENCE["global_macro"], _build_bond_section(gm=gm, macro=macro, monetary=monetary)),
+        ("【G】" + " " + _DATA_CONFIDENCE["global_macro"], _build_derivatives_section(gm=gm, crypto=crypto, north=north, comparison=comparison, monetary=monetary)),
     ]
     for label, text in sections:
         if text:
+            lines.append(label)
             lines.append(text)
             lines.append("")
 
@@ -288,22 +307,27 @@ async def generate_daily_report(version: str = "close") -> dict:
     if not is_trading:
         logger.info(f"Non-trading day ({report_date}), fetching available data anyway")
 
-    # 获取各模块数据
+    # 获取各模块数据（异步线程池，避免阻塞事件循环）
     logger.info("Fetching all data modules (v2.0)...")
-    market = get_market_overview()
-    macro = get_macro_data()
-    north = get_north_flow()
-    etf = get_etf_data()
-    leading = get_leading_stocks()
-    global_m = get_global_macro()
-    bse = get_bse_data()
+    _loop = asyncio.get_event_loop()
+    market, macro, north, etf, leading, global_m, bse = await asyncio.gather(
+        _loop.run_in_executor(None, get_market_overview),
+        _loop.run_in_executor(None, get_macro_data),
+        _loop.run_in_executor(None, get_north_flow),
+        _loop.run_in_executor(None, get_etf_data),
+        _loop.run_in_executor(None, get_leading_stocks),
+        _loop.run_in_executor(None, get_global_macro),
+        _loop.run_in_executor(None, get_bse_data),
+    )
 
-    # 新增数据源
-    us_market = get_us_market()
-    crypto = get_crypto_data()
-    futures = get_futures_data()
-    monetary = get_monetary_data()
-    comparison = get_intraday_comparison()
+    # 新增数据源（异步并行）
+    us_market, crypto, futures, monetary, comparison = await asyncio.gather(
+        _loop.run_in_executor(None, get_us_market),
+        _loop.run_in_executor(None, get_crypto_data),
+        _loop.run_in_executor(None, get_futures_data),
+        _loop.run_in_executor(None, get_monetary_data),
+        _loop.run_in_executor(None, get_intraday_comparison),
+    )
 
     data = {
         "report_date": report_date,
@@ -339,7 +363,10 @@ async def generate_daily_report(version: str = "close") -> dict:
 
     if market_summary and len(market_summary) > 20:
         try:
-            commentary = await generate_commentary(market_summary)
+            # 自动检测市场上下文，动态加载知识库章节
+            from services.llm_service import _detect_market_context
+            market_context = _detect_market_context(data)
+            commentary = await generate_commentary(market_summary, market_context)
         except Exception as e:
             logger.error(f"Failed to generate LLM commentary: {e}")
             commentary = ""
@@ -421,8 +448,8 @@ async def generate_daily_report(version: str = "close") -> dict:
         from services.decision_engine import analyze_stock, get_portfolio_summary
         
         # 只扫描自选股+持仓（非交易日也扫描，不限制）
-        watchlist = get_watchlist()
-        holdings = get_holdings()
+        watchlist = await get_watchlist()
+        holdings = await get_holdings()
         
         # 去重合并
         all_symbols = {}

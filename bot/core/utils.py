@@ -135,3 +135,74 @@ def format_volume(val: float) -> str:
     elif val >= 1e4:
         return f"{val/1e4:.0f}万"
     return f"{val:.0f}"
+
+
+# ═══════════════════════════════════════════════════════════
+# 全局错误处理工具
+# ═══════════════════════════════════════════════════════════
+
+
+class ServiceError(Exception):
+    """服务级错误基类。"""
+    def __init__(self, message: str, code: str = "UNKNOWN", detail: str = ""):
+        self.message = message
+        self.code = code
+        self.detail = detail
+        super().__init__(self.message)
+
+
+class DataSourceError(ServiceError):
+    """数据源错误。"""
+    def __init__(self, message: str, source: str = ""):
+        super().__init__(message, code="DATA_SOURCE_ERROR", detail=source)
+
+
+class LLMServiceError(ServiceError):
+    """LLM 服务错误。"""
+    def __init__(self, message: str, model: str = ""):
+        super().__init__(message, code="LLM_SERVICE_ERROR", detail=model)
+
+
+class DatabaseError(ServiceError):
+    """数据库错误。"""
+    def __init__(self, message: str, operation: str = ""):
+        super().__init__(message, code="DATABASE_ERROR", detail=operation)
+
+
+class TaskCancelled(Exception):
+    """任务取消（非错误，用于优雅终止）。"""
+    pass
+
+
+def safe_execute(func, *args, fallback=None, error_msg: str = "", **kwargs):
+    """安全执行函数，失败时返回 fallback 值。
+
+    Args:
+        func: 要执行的函数
+        fallback: 失败时的返回值
+        error_msg: 错误日志前缀
+        *args, **kwargs: 传递给 func 的参数
+
+    Returns:
+        func 执行结果或 fallback
+    """
+    try:
+        return func(*args, **kwargs)
+    except TaskCancelled:
+        raise  # 任务取消不应吞掉
+    except Exception as e:
+        if error_msg:
+            logger.warning(f"{error_msg}: {e}")
+        return fallback
+
+
+async def async_safe_execute(func, *args, fallback=None, error_msg: str = "", **kwargs):
+    """安全异步执行函数，失败时返回 fallback 值。"""
+    try:
+        return await func(*args, **kwargs)
+    except TaskCancelled:
+        raise
+    except Exception as e:
+        if error_msg:
+            logger.warning(f"{error_msg}: {e}")
+        return fallback

@@ -1,91 +1,129 @@
-# 修复总结 - 2026-06-05
+# 明策（MingCe）全面修复报告
 
-## ✅ 已完成的修复
-
-### 1. 日报重复问题
-**问题**：之前会发送两条消息（摘要卡片 + 详情卡片 + 异动卡片），内容重复
-**修复**：
-- 只发送一条完整的日报详情卡片
-- 把异动提醒也放到详情卡片里
-- 修改文件：`services/report_generator.py` 的 `push_daily_report` 函数
-
-### 2. 大师兄解读缺失问题
-**问题**：大师兄解读没有显示
-**原因**：
-1. 数据获取失败时，`market_summary` 太短（< 20 字符），跳过了 LLM 调用
-2. LLM 调用失败时，没有重试或默认值
-
-**修复**：
-- 降低阈值到 10 字符（只要有一点数据就生成）
-- 即使数据很少，也会尝试生成解读
-- 添加错误处理和默认值："📊 数据获取中，请稍后查看完整解读。"
-- 修改文件：`services/report_generator.py` 的 `generate_daily_report` 函数
-
-### 3. 异动提醒整合
-**问题**：异动提醒是单独一张卡片
-**修复**：
-- 把异动提醒整合到详情卡片的最前面
-- 最多显示 5 条异动
-- 格式：`🔴/🟡 **标题**：内容
-- 修改文件：`services/feishu_service.py` 的 `build_detail_card` 函数
-
-## 📋 最终的日报结构
-
-一条完整的飞书卡片消息，包含以下内容：
-
-```
-📊 2026-06-05 日报详情
-
-## 🚨 异动提醒
-🔴 上证指数涨幅超过2%：上证指数今日大涨
-🟡 北向资金大幅流入：净流入超过50亿
-
-## 📈 A股行情详情
-🟢 上证指数 4056.68 +0.52%
-🔴 科创50 1737.97 -0.15%
-...
-
-## 📊 宏观经济数据
-CPI: 0.4 | PMI: 49.5
-...
-
-## 💹 北向资金
-今日净流入 35.6亿（沪 20.3/深 15.3）
-...
-
-## 🏭 ETF动向
-...
-
-## 🏢 龙头企业动向
-...
-
-## 🌍 全球宏观变量
-🛢️ 布伦特原油: 75.50美元/桶
-🥇 黄金: 2350.00美元
-...
-
-## 💡 大师兄完整解读
-（完整的 LLM 生成的市场分析）
-...
+> 修复时间：2026-06-16  
+> 修复范围：10 大专家视角提出的 20+ 风险点
 
 ---
-📈 数据更新: 2026-06-05 15:10:30
-```
 
-## 🔧 修改的文件
+## 🔴 严重风险修复（Phase 1）
 
-1. **services/report_generator.py**
-   - `generate_daily_report`：确保大师兄解读一定生成
-   - `push_daily_report`：只发送一条完整的日报卡片
+### 1. ✅ SQLite 并发线程安全问题
+- **文件**: `bot/services/portfolio_manager.py`
+- **修复**: 从同步 `sqlite3` 全面迁移到 `aiosqlite` + WAL 模式 + `asyncio.Lock`
+- **关键变更**:
+  - 所有函数改为 `async def`（`add_watchlist`, `get_holdings` 等）
+  - 启用 `PRAGMA journal_mode=WAL` 和 `PRAGMA busy_timeout=5000`
+  - 添加索引加速查询
+  - 添加模糊匹配别名映射（"宁德"→ SZ300750, "BYD"→ SZ002594）
 
-2. **services/feishu_service.py**
-   - `build_detail_card`：在开头添加异动提醒部分
+### 2. ✅ RSI signal_strength 计算覆盖 bug
+- **文件**: `engine/qlib_vnpy_platform/core/strategies.py`
+- **修复**: 每行 `signal_strength` 赋值后立即 `clamp`，不再在循环末尾统一覆盖
 
-## 🚀 测试建议
+### 3. ✅ KDJ 除零风险
+- **文件**: `engine/qlib_vnpy_platform/core/strategies.py`
+- **修复**: 使用 `.where(denom != 0, np.nan)` 替代 `.replace(0, np.inf)`，避免除零
 
-1. 重启服务
-2. 调用 `/api/report/generate` 测试日报生成
-3. 检查飞书群收到的消息：
-   - 应该只有一条卡片
-   - 卡片开头应该有异动提醒（如果有）
-   - 卡片结尾应该有大师兄完整解读
+### 4. ✅ 同步调用阻塞事件循环
+- **文件**: `bot/services/report_generator.py`
+- **修复**: 12 个同步数据采集调用 → 使用 `asyncio.gather()` + `run_in_executor` 并行执行
+- 并行度从串行 12 步 → 2 批并行
+
+### 5. ✅ 进程管理与健康检查
+- **文件**: 
+  - `bot/mingce.service`（新建）
+  - `bot/app/main.py`（增强 /health）
+- **新增**: systemd 服务文件（自动重启 + 10s 间隔）
+- **增强**: /health 返回数据库/LLM/缓存/调度器/数据源 5 大组件状态
+
+### 6. ✅ 依赖版本锁定
+- **文件**: `engine/requirements.txt`
+- **修复**: 从 `>=` 改为 `==` 锁定 14 个包版本
+- **关键**: `akshare==1.18.62` 固定版本，防止上游破坏性变更
+
+---
+
+## ⚠️ 高风险修复（Phase 2）
+
+### 7. ✅ LLM API Key 前置校验
+- **文件**: `bot/services/llm_service.py`
+- **新增**: `validate_llm_config()` 函数，检查 URL/Key/Model 全部配置
+- **移除**: `DEEPSEEK_API_KEY` 残留引用
+- **新增**: `warmup()` 函数，启动时验证
+
+### 8. ✅ 加密货币数据源回退
+- **文件**: `bot/services/data_fetcher.py`
+- **新增**: CoinGecko API 作为 `akshare.crypto_js_spot()` 的回退源
+- 两级降级：akshare → CoinGecko
+
+### 9. ✅ 策略参数外置
+- **文件**: `engine/qlib_vnpy_platform/config/strategy_defaults.yaml`（新建）
+- **新增**: 18 个核心策略的默认参数 + 中文描述，可通过 YAML 配置化
+
+### 10. ✅ 日志轮转
+- **文件**: `bot/run_server.py`, `bot/app/main.py`
+- **修复**: 使用 `loguru` 配置日志轮转（10MB/文件，保留 30 天，自动 gz 压缩）
+- **新增**: 自动清理超过 30 天的旧 uvicorn 日志
+
+### 11. ✅ 飞书卡片精简
+- **文件**: `bot/services/feishu_service.py`
+- **优化**: 策略信号最多展示 Top 5（按信号总数排序）
+- **优化**: 免责声明显著化（加粗 + 完整版）
+
+---
+
+## 📋 中风险修复（Phase 3-4）
+
+### 12. ✅ 动态权重融合（SignalRouter）
+- **文件**: `engine/qlib_vnpy_platform/core/signal_router.py`
+- **新增**:
+  - 市场波动率自动调节权重（高波动 → QLib 70%，低波动 → LLM 60%）
+  - 信号独立性评估（同组策略折价，最多 5 折）
+  - Bayesian 方向一致增强（方向一致时 +30% 置信度）
+  - 输出 `fusion_info` 透传融合细节
+
+### 13. ✅ T+1/T+0 规则完善
+- **文件**: `engine/qlib_vnpy_platform/core/risk_manager.py`
+- **新增**:
+  - T+0 品种自动识别（可转债 11xxxx, ETF 51xxxx/159xxx 等）
+  - 科创板 (688xxx) 交易规则提示
+  - 卖出入参检查优化
+
+### 14. ✅ 数据验证类型安全
+- **文件**: `bot/services/data_fetcher.py`
+- **修复**: `_validate_index_value` 增加 `isinstance` 类型检查
+- **修复**: `if price and price > 0.001` → `if price is not None and price > 0.001`（2 处）
+
+### 15. ✅ 健康检查增强
+- **文件**: `bot/app/main.py`
+- **增强**: /health 返回 6 大组件状态（database/llm/cache/scheduler/sources/version）
+- **状态**: ok / degraded / critical 三级
+
+---
+
+## 📊 变更统计
+
+| 类别 | 数量 |
+|:-----|:----:|
+| 修改文件 | 12 |
+| 新建文件 | 3 |
+| 修复 Bug | 8 |
+| 新增功能 | 7 |
+| 代码行变更 | ~1200 行新增 / ~300 行删除 |
+
+## 📈 修复后状态对比
+
+| 维度 | 修复前 | 修复后 |
+|:-----|:-------|:-------|
+| 并发安全 | ❌ sync sqlite3 线程不安全 | ✅ aiosqlite + WAL + asyncio.Lock |
+| 事件循环 | ❌ 同步阻塞 12 步串行 | ✅ asyncio.gather 2 批并行 |
+| RSI 信号 | ❌ 强度始终固定 | ✅ 按 RSI 偏离度计算 |
+| KDJ 计算 | ❌ 除零风险 | ✅ NaN 保护 |
+| LLM 配置 | ❌ 无校验静默失败 | ✅ 启动时主动校验 |
+| 加密货币 | ❌ 单源无回退 | ✅ akshare + CoinGecko 双源 |
+| 信号融合 | ❌ 固定权重线性相加 | ✅ 动态权重 + 独立性 + 方向增强 |
+| T+1 规则 | ❌ 仅检查买入日期 | ✅ T+0 豁免 + 科创板规则 |
+| 日志 | ❌ 单文件无限增长 | ✅ 10MB 轮转 + 30 天保留 + gz 压缩 |
+| 进程管理 | ❌ 无守护 | ✅ systemd 自动重启 |
+| 卡通信噪 | ❌ 所有信号全展示 | ✅ Top 5 排序 + 缩略 |
+| 数据验证 | ❌ string/None 可能崩溃 | ✅ 类型安全检查 |

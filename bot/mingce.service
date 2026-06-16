@@ -1,0 +1,29 @@
+[Unit]
+Description=明策（MingCe）全景投资决策系统
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/mingce/bot
+EnvironmentFile=/opt/mingce/bot/.env
+ExecStart=/opt/mingce/bot/.venv/bin/python run_server.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
+ExecReload=/bin/kill -SIGTERM $MAINPID && /bin/sleep 2 && /opt/mingce/bot/.venv/bin/python run_server.py
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# 安全设置
+ProtectHome=no
+ReadWritePaths=/opt/mingce/bot/data /opt/mingce/bot/logs
+PrivateTmp=yes
+
+# 日志
+StandardOutput=append:/opt/mingce/bot/logs/mingce.log
+StandardError=append:/opt/mingce/bot/logs/mingce_error.log
+
+[Install]
+WantedBy=multi-user.target

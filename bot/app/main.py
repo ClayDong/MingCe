@@ -48,6 +48,61 @@ def _prune_task_store():
         _task_store.pop(next(iter(_task_store)))
 
 
+async def _persist_task(task_id: str, status: str, task_type: str = "",
+                         result: str = "", error: str = ""):
+    """持久化任务状态到 SQLite（异步，失败不阻塞主流程）。
+
+    内存中的 _task_store 仍然保留，作为快速查询缓存；
+    SQLite 作为持久化备份，重启后可恢复。
+    """
+    try:
+        from core.database import get_db
+        db = await get_db()
+        await db.execute(
+            """INSERT INTO task_store (task_id, task_type, status, result, error, updated_at)
+               VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(task_id) DO UPDATE SET
+                   status = excluded.status,
+                   result = excluded.result,
+                   error = excluded.error,
+                   updated_at = CURRENT_TIMESTAMP""",
+            (task_id, task_type, status, result, error),
+        )
+    except Exception as e:
+        logger.debug(f"任务状态持久化失败（不影响主流程）: {e}")
+
+
+async def _load_tasks_from_db():
+    """启动时从 SQLite 恢复最近的任务状态。"""
+    try:
+        from core.database import get_db
+        db = await get_db()
+        rows = await db.fetchall(
+            """SELECT task_id, task_type, status, result, error, updated_at
+               FROM task_store
+               WHERE updated_at >= datetime('now', '-1 day')
+               ORDER BY updated_at DESC
+               LIMIT 50""",
+        )
+        for row in rows:
+            r = dict(row)
+            # 将 running 状态标记为 interrupted（重启后无法继续）
+            status = r["status"]
+            if status == "running":
+                status = "interrupted"
+            _task_store[r["task_id"]] = {
+                "status": status,
+                "type": r["task_type"],
+                "result": r["result"],
+                "error": r["error"],
+                "restored": True,
+            }
+        if rows:
+            logger.info(f"✓ 从 SQLite 恢复 {len(rows)} 个任务状态")
+    except Exception as e:
+        logger.debug(f"从 SQLite 恢复任务状态失败: {e}")
+
+
 # ── 调度任务 ──────────────────────────────────────────────
 
 async def scheduled_report(version: str):
@@ -56,13 +111,16 @@ async def scheduled_report(version: str):
     task_id = f"sched_{version}_{date.today().isoformat()}"
     _task_store[task_id] = {"status": "running", "version": version}
     _prune_task_store()
+    await _persist_task(task_id, "running", "scheduled_report")
     try:
         data = await generate_daily_report(version)
         await push_daily_report(data)
         _task_store[task_id] = {"status": "completed", "version": version}
+        await _persist_task(task_id, "completed", "scheduled_report")
         logger.info(f"Scheduled report {version} completed")
     except Exception as e:
         _task_store[task_id] = {"status": "failed", "version": version, "error": str(e)}
+        await _persist_task(task_id, "failed", "scheduled_report", error=str(e))
         logger.error(f"Scheduled report {version} failed: {e}", exc_info=True)
         await send_alert(
             f"📰 日报 [{version}] 生成失败\n```\n{str(e)[:300]}\n```",
@@ -78,7 +136,7 @@ async def scheduled_fund_monitor():
     _prune_task_store()
     try:
         monitor = FundMonitor(_fund_monitor_config)
-        result = monitor.run_monitor()
+        result = await monitor.run_monitor()
         
         if result.get("status") == "success":
             # 保存本地报告
@@ -117,6 +175,9 @@ async def lifespan(app: FastAPI):
     db = await get_db()
     logger.info("Database initialized successfully")
 
+    # 从 SQLite 恢复最近的任务状态
+    await _load_tasks_from_db()
+
     # 清理过期缓存
     from core.cache import FileCache
     cache = FileCache()
@@ -137,8 +198,23 @@ async def lifespan(app: FastAPI):
         id="fund_monitor", misfire_grace_time=600,
         replace_existing=True,
     )
+
+    # 信号生命周期评估：每日 16:00 执行
+    async def scheduled_signal_evaluation():
+        """定时任务：评估活跃信号的生命周期。"""
+        from services.signal_tracker import get_signal_tracker
+        tracker = get_signal_tracker()
+        stats = await tracker.evaluate_active_signals()
+        logger.info(f"信号生命周期评估完成: {stats}")
+
+    scheduler.add_job(
+        scheduled_signal_evaluation, "cron", hour=16, minute=0,
+        id="signal_evaluation", misfire_grace_time=600,
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info("Scheduler started: 08:00(early) / 09:10(morning) / 11:35(noon) / 15:10(close) / 15:35(fund_monitor) / 五维框架 v2.0")
+    logger.info("Scheduler started: 08:00(early) / 09:10(morning) / 11:35(noon) / 15:10(close) / 15:35(fund_monitor) / 16:00(signal_eval) / 五维框架 v2.0")
 
     yield
 
@@ -168,21 +244,143 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    """健康检查接口。"""
+    """健康检查接口（带详细组件状态）。"""
     db_ok = False
+    db_error = None
     try:
         db = await get_db()
-        await db.fetchone("SELECT 1")
-        db_ok = True
-    except Exception:
-        pass
+        row = await db.fetchone("SELECT 1")
+        db_ok = row is not None
+    except Exception as e:
+        db_error = str(e)
+
+    # 检查 LLM 服务
+    llm_ok = bool(settings.LLM_API_KEY and settings.LLM_BASE_URL and settings.LLM_MODEL)
+
+    # 检查缓存
+    from core.cache import FileCache
+    cache = FileCache()
+    cache_ok = cache is not None and hasattr(cache, 'cache_dir')
+
+    # 检查数据源（快速检查）
+    from core.data_quality import get_monitor
+    monitor = get_monitor()
+    degraded_sources = [
+        name for name, stats in monitor.source_stats.items()
+        if stats.get("consecutive_failures", 0) >= 2
+    ]
+
+    all_ok = db_ok and llm_ok and cache_ok
+    status = "ok" if all_ok else "degraded"
+    if not db_ok:
+        status = "critical"
+
     return {
-        "status": "ok" if db_ok else "degraded",
+        "status": status,
         "timestamp": datetime.now().isoformat(),
-        "db": "connected" if db_ok else "disconnected",
-        "scheduler": "running" if scheduler.running else "stopped",
+        "components": {
+            "database": {
+                "status": "connected" if db_ok else "disconnected",
+                "error": db_error,
+            },
+            "llm": {
+                "status": "configured" if llm_ok else "unconfigured",
+                "model": settings.LLM_MODEL or "N/A",
+            },
+            "cache": {
+                "status": "ok" if cache_ok else "error",
+            },
+            "scheduler": {
+                "status": "running" if scheduler.running else "stopped",
+                "jobs": [j.id for j in scheduler.get_jobs()],
+            },
+            "data_sources": {
+                "total": len(monitor.source_stats),
+                "degraded": degraded_sources,
+            },
+        },
         "version": settings.VERSION,
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus 指标端点（Prometheus 文本格式）。"""
+    from core.cache import FileCache
+    from core.data_quality import get_monitor as _get_monitor
+    from services.data_fetcher import get_latest_quality_report
+    from pathlib import Path
+    import time as _time
+
+    lines = []
+    lines.append('# HELP mingce_info 明策系统元信息')
+    lines.append('# TYPE mingce_info gauge')
+    lines.append(f'mingce_info{{version="{settings.VERSION}",debug="{str(settings.DEBUG).lower()}"}} 1')
+
+    lines.append('')
+    lines.append('# HELP mingce_scheduler_running 调度器运行状态')
+    lines.append('# TYPE mingce_scheduler_running gauge')
+    lines.append(f'mingce_scheduler_running {1 if scheduler.running else 0}')
+
+    lines.append('')
+    lines.append('# HELP mingce_database_up 数据库连接状态')
+    lines.append('# TYPE mingce_database_up gauge')
+    try:
+        _db = await get_db()
+        await _db.fetchone("SELECT 1")
+        lines.append('mingce_database_up 1')
+    except Exception:
+        lines.append('mingce_database_up 0')
+
+    lines.append('')
+    lines.append('# HELP mingce_llm_configured LLM 配置状态')
+    lines.append('# TYPE mingce_llm_configured gauge')
+    llm_ok = 1 if (settings.LLM_API_KEY and settings.LLM_BASE_URL and settings.LLM_MODEL) else 0
+    lines.append(f'mingce_llm_configured {llm_ok}')
+
+    _cache = FileCache()
+    lines.append('')
+    lines.append('# HELP mingce_cache_files 缓存文件数')
+    lines.append('# TYPE mingce_cache_files gauge')
+    try:
+        cache_files = len(list(Path(settings.CACHE_DIR).glob("*.json"))) if Path(settings.CACHE_DIR).exists() else 0
+    except Exception:
+        cache_files = 0
+    lines.append(f'mingce_cache_files {cache_files}')
+
+    _mon = _get_monitor()
+    lines.append('')
+    lines.append('# HELP mingce_data_source_health 数据源健康状态')
+    lines.append('# TYPE mingce_data_source_health gauge')
+    for src_name, stats in _mon.source_stats.items():
+        health = _mon.get_health(src_name)
+        val = 1 if health.value == "healthy" else 0
+        failures = stats.get("consecutive_failures", 0)
+        lines.append(f'mingce_data_source_health{{source="{src_name}",failures="{failures}"}} {val}')
+
+    lines.append('')
+    lines.append('# HELP mingce_data_quality_score 各模块数据质量评分')
+    lines.append('# TYPE mingce_data_quality_score gauge')
+    for mod in ["market", "macro", "north_flow", "global_macro", "crypto", "futures"]:
+        report = get_latest_quality_report(mod)
+        if report:
+            score = report.metrics.overall_score
+            level = report.metrics.level.value
+            lines.append(f'mingce_data_quality_score{{module="{mod}",level="{level}"}} {score:.2f}')
+
+    lines.append('')
+    lines.append('# HELP mingce_reports_today 今日已生成报告数')
+    lines.append('# TYPE mingce_reports_today gauge')
+    try:
+        _db2 = await get_db()
+        today = date.today().isoformat()
+        rows = await _db2.fetchall("SELECT COUNT(*) as cnt FROM daily_reports WHERE report_date = ?", (today,))
+        report_count = rows[0]["cnt"] if rows else 0
+    except Exception:
+        report_count = 0
+    lines.append(f'mingce_reports_today {report_count}')
+
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/api/metrics")
@@ -230,14 +428,14 @@ async def get_strategy_signals(
     """
     adapter = get_adapter()
     if symbol:
-        result = adapter.get_signals([symbol])
+        result = await adapter.get_signals_async([symbol])
         if result:
             # 返回单只股票数据
             data = result.get(symbol, result)
             return {"success": True, "data": data, "symbol": symbol}
         return {"success": False, "error": f"无法获取 {symbol} 的策略信号"}
     else:
-        result = adapter.get_all_signals()
+        result = await adapter.get_all_signals_async()
         if result and result.get("symbols"):
             return {"success": True, "symbols": result["symbols"],
                     "total": result.get("total_symbols", 0),
@@ -269,7 +467,7 @@ async def batch_strategy_signals(request: Request):
         raise HTTPException(status_code=400, detail="单次请求最多 50 只股票")
 
     adapter = get_adapter()
-    result = adapter.get_signals(symbols)
+    result = await adapter.get_signals_async(symbols)
     return {"success": True, "symbols": result, "requested": len(symbols), "returned": len(result)}
 
 
@@ -290,8 +488,9 @@ async def _run_push_strategy_signals(task_id: str, version: str = "opening"):
     """执行策略信号推送。"""
     try:
         _task_store[task_id]["status"] = "running"
+        await _persist_task(task_id, "running", "strategy_signals_push")
         adapter = get_adapter()
-        signals_data = adapter.get_all_signals()
+        signals_data = await adapter.get_all_signals_async()
         if signals_data and signals_data.get("symbols"):
             from services.feishu_service import send_card_message, get_tenant_token
             await get_tenant_token()
@@ -300,12 +499,17 @@ async def _run_push_strategy_signals(task_id: str, version: str = "opening"):
             if ok:
                 _task_store[task_id] = {"status": "completed", "type": "strategy_signals_push",
                                         "stocks": len(signals_data.get("symbols", {}))}
+                await _persist_task(task_id, "completed", "strategy_signals_push",
+                                    result=f"stocks={len(signals_data.get('symbols', {}))}")
             else:
                 _task_store[task_id] = {"status": "failed", "type": "strategy_signals_push", "error": "send failed"}
+                await _persist_task(task_id, "failed", "strategy_signals_push", error="send failed")
         else:
             _task_store[task_id] = {"status": "failed", "type": "strategy_signals_push", "error": "no signal data"}
+            await _persist_task(task_id, "failed", "strategy_signals_push", error="no signal data")
     except Exception as e:
         _task_store[task_id] = {"status": "failed", "type": "strategy_signals_push", "error": str(e)}
+        await _persist_task(task_id, "failed", "strategy_signals_push", error=str(e))
         logger.error(f"Strategy signals push failed: {e}", exc_info=True)
 
 
@@ -328,12 +532,15 @@ async def manual_generate(
 async def _run_generate_and_push(task_id: str, version: str):
     try:
         _task_store[task_id]["status"] = "running"
+        await _persist_task(task_id, "running", "manual_report")
         data = await generate_daily_report(version)
         await push_daily_report(data)
         _task_store[task_id]["status"] = "completed"
+        await _persist_task(task_id, "completed", "manual_report")
     except Exception as e:
         _task_store[task_id]["status"] = "failed"
         _task_store[task_id]["error"] = str(e)
+        await _persist_task(task_id, "failed", "manual_report", error=str(e))
         logger.error(f"Manual report generation failed: {e}", exc_info=True)
 
 
@@ -564,9 +771,10 @@ async def _run_fund_monitor_task(task_id: str):
     """执行基金监控任务。"""
     try:
         _task_store[task_id]["status"] = "running"
+        await _persist_task(task_id, "running", "fund_monitor")
         monitor = FundMonitor(_fund_monitor_config)
-        result = monitor.run_monitor()
-        
+        result = await monitor.run_monitor()
+
         if result.get("status") == "success":
             # 保存本地报告
             output_dir = Path("./data/fund_monitor")
@@ -574,19 +782,22 @@ async def _run_fund_monitor_task(task_id: str):
             output_file = output_dir / f"monitor_{result.get('date', date.today().isoformat())}.json"
             with open(output_file, "w") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
-            
+
             # 发送飞书通知
             if settings.FEISHU_CHAT_ID:
                 from services.feishu_service import send_card_message, get_tenant_token
                 await get_tenant_token()
                 card = build_fund_monitor_card(result)
                 await send_card_message(settings.FEISHU_CHAT_ID, card)
-            
+
             _task_store[task_id] = {"status": "completed", "type": "fund_monitor", "result": result}
+            await _persist_task(task_id, "completed", "fund_monitor", result="success")
         else:
             _task_store[task_id] = {"status": "failed", "type": "fund_monitor", "error": result.get("message")}
+            await _persist_task(task_id, "failed", "fund_monitor", error=result.get("message", ""))
     except Exception as e:
         _task_store[task_id] = {"status": "failed", "type": "fund_monitor", "error": str(e)}
+        await _persist_task(task_id, "failed", "fund_monitor", error=str(e))
         logger.error(f"Fund monitor task failed: {e}", exc_info=True)
 
 
@@ -652,3 +863,28 @@ async def update_fund_monitor_cost(
     except Exception as e:
         logger.error(f"Failed to save fund monitor config: {e}")
         return {"success": False, "message": f"保存失败: {e}"}
+
+# ── 应用启动时的 loguru 日志轮转配置 ──
+
+import sys as _sys
+# 仅在首次导入时配置 loguru 轮转
+_loguru_configured = getattr(logger, "_rotation_configured", False)
+if not _loguru_configured:
+    logger.remove()
+    logger.add(
+        _sys.stderr,
+        colorize=True,
+        format="<green>{time:HH:mm:ss}</green> [<level>{level}</level>] <level>{message}</level>",
+        level="INFO",
+    )
+    logger.add(
+        "logs/mingce_{time:YYYYMMDD}.log",
+        rotation="10 MB",
+        retention="30 days",
+        compression="gz",
+        encoding="utf-8",
+        level="DEBUG",
+        backtrace=True,
+        diagnose=False,
+    )
+    logger._rotation_configured = True

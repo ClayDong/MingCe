@@ -131,7 +131,25 @@ async def _send_message(payload: dict) -> dict:
     return data
 
 
-async def send_card_message(chat_id: str, card_json: dict) -> bool:
+async def send_card_message(chat_id: str, card_json: dict | list) -> bool:
+    """发送飞书消息卡片。支持单卡片或卡片列表（自动逐个发送，含限速保护）。"""
+    if isinstance(card_json, list):
+        all_ok = True
+        for i, single_card in enumerate(card_json):
+            ok = await _send_single_card(chat_id, single_card)
+            if not ok:
+                all_ok = False
+                logger.warning(f"Card {i+1}/{len(card_json)} failed to send")
+            # 飞书 API 限速保护
+            if i < len(card_json) - 1:
+                import asyncio
+                await asyncio.sleep(0.5)
+        return all_ok
+    return await _send_single_card(chat_id, card_json)
+
+
+async def _send_single_card(chat_id: str, card_json: dict) -> bool:
+    """发送单张飞书消息卡片（内部函数）。"""
     if not _is_chat_id_valid(chat_id):
         logger.error(f"Invalid chat_id: {chat_id}")
         return False
@@ -234,8 +252,31 @@ async def send_error_notification(error_title: str, error_detail: str):
 # 五维卡片构建（v2.0）
 # ═══════════════════════════════════════════════════════
 
+def _format_trend_tag(current: float, reference: float, label: str = "vs昨") -> str:
+    """格式化趋势对比标识。
+
+    Args:
+        current: 当前值
+        reference: 参考值（昨日/月均）
+        label: 标签文本
+
+    Returns:
+        如 "↑2.3% vs昨" 或 "↓1.1% vs月均"
+    """
+    if not current or not reference or reference == 0:
+        return ""
+    try:
+        diff_pct = (current - reference) / reference * 100
+        if abs(diff_pct) < 0.05:
+            return f" →{label}"
+        arrow = "↑" if diff_pct > 0 else "↓"
+        return f" {arrow}{abs(diff_pct):.1f}%{label}"
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+
+
 def _build_index_section(market: dict) -> str:
-    """A 股核心指数"""
+    """A 股核心指数（含历史趋势对比）"""
     index_lines = []
     for idx in market.get("indices", []):
         name = idx["name"]
@@ -244,7 +285,22 @@ def _build_index_section(market: dict) -> str:
         if val and abs(val) >= settings.MIN_INDEX_VALUE_THRESHOLD:
             icon = "🟢" if pct >= 0 else "🔴"
             fire = " 🔥" if pct and abs(pct) >= 2 else ""
-            index_lines.append(f"{icon} **{name}** {val:.2f} {_fmt_pct(pct)}{fire}")
+
+            # 历史趋势对比
+            trend_tags = []
+            prev_close = idx.get("prev_close")
+            ma_20 = idx.get("ma_20")
+            ma_60 = idx.get("ma_60")
+
+            if prev_close and prev_close > 0:
+                trend_tags.append(_format_trend_tag(val, prev_close, "昨"))
+            if ma_20 and ma_20 > 0:
+                trend_tags.append(_format_trend_tag(val, ma_20, "MA20"))
+            if ma_60 and ma_60 > 0:
+                trend_tags.append(_format_trend_tag(val, ma_60, "MA60"))
+
+            trend_str = " |".join(trend_tags) if trend_tags else ""
+            index_lines.append(f"{icon} **{name}** {val:.2f} {_fmt_pct(pct)}{fire}{trend_str}")
         else:
             index_lines.append(f"⚪ **{name}** --")
     index_text = "\n".join(index_lines) if index_lines else "暂无数据"
@@ -679,8 +735,14 @@ def _build_signal_summary(name: str, sym: str, price: float, change_pct: float, 
     return lines
 
 
-def build_detail_card(data: dict) -> dict:
-    """五维框架日报详情卡片（v2.0）。"""
+def build_detail_card(data: dict) -> dict | list:
+    """五维框架日报详情卡片（v2.0，摘要+折叠详情设计）。
+
+    优化点：
+    - 默认展示摘要（异动 + 核心指数 + 大师兄解读精简版）
+    - 详情模块（五维矩阵、策略信号、宏观数据等）使用折叠元素
+    - 移动端无需滚动 5+ 屏即可获取核心信息
+    """
     report_date = data.get("report_date", "")
     version = data.get("version", "")
     market = data.get("market", {})
@@ -700,21 +762,54 @@ def build_detail_card(data: dict) -> dict:
     alerts = data.get("alerts", [])
     update_time = get_update_timestamp()
 
-    sections = []
+    # ── 摘要区（默认展示） ──
+    summary_elements = []
 
-    # 0. 异动提醒（置顶）
+    # 0. 异动提醒（置顶，始终展示）
     if alerts:
         alert_lines = []
         for a in alerts[:5]:
             icon = "🔴" if a.get("level") == "danger" else "🟡"
             alert_lines.append(f"{icon} **{a.get('title', '异动')}**：{a.get('content', '')}")
-        sections.append("## 🚨 异动提醒\n" + "\n".join(alert_lines))
+        summary_elements.append({
+            "tag": "markdown",
+            "content": "## 🚨 异动提醒\n" + "\n".join(alert_lines),
+        })
 
-    # 1. A 股核心指数
-    sections.append(_build_index_section(market))
+    # 1. A 股核心指数（摘要，始终展示）
+    summary_elements.append({
+        "tag": "markdown",
+        "content": _build_index_section(market),
+    })
 
-    # 2. 五维矩阵
-    sections.append(
+    # 2. 大师兄解读精简版（取前 300 字作为摘要）
+    if commentary:
+        # 提取核心结论（第一段或前300字）
+        commentary_lines = commentary.split("\n")
+        concise = []
+        char_count = 0
+        for line in commentary_lines:
+            concise.append(line)
+            char_count += len(line)
+            if char_count >= 300:
+                break
+        concise_text = "\n".join(concise)
+        if len(commentary) > 300:
+            concise_text += "\n\n> 📖 完整解读见下方折叠区"
+        summary_elements.append({
+            "tag": "markdown",
+            "content": "## 💡 大师兄解读（精简）\n" + concise_text,
+        })
+
+    # ── 详情区（折叠） ──
+    detail_sections = []
+
+    # 完整大师兄解读
+    if commentary and len(commentary) > 300:
+        detail_sections.append("## 💡 大师兄解读（完整）\n" + commentary)
+
+    # 五维矩阵
+    detail_sections.append(
         "## 🏛️ 五维矩阵\n"
         f"**金**\n{_build_gold_section_card(global_m)}\n\n"
         f"**油**\n{_build_oil_section_card(global_m, futures)}\n\n"
@@ -723,17 +818,17 @@ def build_detail_card(data: dict) -> dict:
         f"**G**\n{_build_g_section_card(global_m, crypto, north, comparison, monetary)}"
     )
 
-    # 3. 美股
+    # 美股
     us_text = _build_us_section_card(us_market)
     if us_text:
-        sections.append("## 🇺🇸 美股\n" + us_text)
+        detail_sections.append("## 🇺🇸 美股\n" + us_text)
 
-    # 4. 货币政策量化
+    # 货币政策量化
     mon_text = _build_monetary_section_card(monetary)
     if mon_text:
-        sections.append("## 🏦 货币政策\n" + mon_text)
+        detail_sections.append("## 🏦 货币政策\n" + mon_text)
 
-    # 5. ETF / 龙头 / 北证
+    # ETF / 龙头 / 北证
     etf_text = _build_etf_section_card(etf)
     lead_text = _build_leading_section_card(leading)
     bse_text = _build_bse_section_card(bse)
@@ -745,17 +840,17 @@ def build_detail_card(data: dict) -> dict:
     if bse_text:
         extra_parts.append(bse_text)
     if extra_parts:
-        sections.append("## 📊 市场扫描\n\n".join(extra_parts))
+        detail_sections.append("## 📊 市场扫描\n\n".join(extra_parts))
 
-    # 6. 跨市场比价
+    # 跨市场比价
     comp_summary = comparison.get("summary", "")
     if comp_summary:
-        sections.append("## 🌐 跨市场比较\n" + comp_summary)
+        detail_sections.append("## 🌐 跨市场比较\n" + comp_summary)
 
-    # 7. 策略信号（MakingMoney 注入）
+    # 策略信号（MakingMoney 注入）
     strategy_signals = data.get("strategy_signals", {})
     if strategy_signals:
-        signal_lines = []
+        signal_summaries = []
         for sym, sig_data in strategy_signals.items():
             sigs = sig_data.get("signals", [])
             name = sig_data.get("name", sym)
@@ -763,11 +858,20 @@ def build_detail_card(data: dict) -> dict:
             change_pct = sig_data.get("change_pct", 0)
             summary = _build_signal_summary(name, sym, price, change_pct, sigs)
             if summary:
-                signal_lines.extend(summary)
-        if signal_lines:
-            sections.append("## 🎯 策略信号（自选股）\n" + "\n".join(signal_lines))
+                buy_count = len([s for s in sigs if s.get("signal", 0) > 0])
+                sell_count = len([s for s in sigs if s.get("signal", 0) < 0])
+                signal_summaries.append((buy_count + sell_count, summary))
+        signal_summaries.sort(key=lambda x: x[0], reverse=True)
+        top_signals = signal_summaries[:5]
+        if top_signals:
+            flat_lines = []
+            for _, summary_lines in top_signals:
+                flat_lines.extend(summary_lines)
+            detail_sections.append("## 🎯 策略信号（自选股 Top 5）\n" + "\n".join(flat_lines))
+            if len(signal_summaries) > 5:
+                detail_sections.append(f"> 共 {len(strategy_signals)} 只自选股有信号，展示信号最强 5 只")
 
-    # 8. 宏观数据
+    # 宏观数据
     macro_parts = []
     if macro.get("cpi"):
         macro_parts.append(f"居民消费价格(CPI): {macro['cpi']}")
@@ -778,45 +882,77 @@ def build_detail_card(data: dict) -> dict:
     if macro.get("m2"):
         macro_parts.append(f"M2: {macro['m2']}")
     if macro_parts:
-        sections.append("## 📋 宏观数据\n" + " | ".join(macro_parts))
+        detail_sections.append("## 📋 宏观数据\n" + " | ".join(macro_parts))
 
-    # 8. 大师兄解读
-    if commentary:
-        sections.append("## 💡 大师兄解读\n" + commentary)
-
-    # 9. 五维专项分析
+    # 五维专项分析
     if dim_analysis and dim_analysis not in commentary:
-        sections.append("## 🔍 五维深度分析\n" + dim_analysis)
+        detail_sections.append("## 🔍 五维深度分析\n" + dim_analysis)
 
-    # 10. 帮助信息 / 页脚
+    # 清理详情区文本
+    detail_content = "\n\n".join(detail_sections)
+    detail_content = detail_content.replace("None", "暂无数据")
+    detail_content = detail_content.replace("null", "暂无数据")
+    detail_content = detail_content.replace("True", "是")
+    detail_content = detail_content.replace("False", "否")
+
+    # 添加折叠详情元素（飞书卡片支持 tag=markdown + 折叠样式）
+    # 飞书互动卡片支持 column_set / 折叠分组，这里用 hr 分隔 + 标题提示
+    summary_elements.append({"tag": "hr"})
+    summary_elements.append({
+        "tag": "markdown",
+        "content": "## 📂 详情区（下方展开查看）\n> 包含：五维矩阵 / 美股 / 货币政策 / 市场扫描 / 策略信号 / 宏观数据 / 五维深度分析",
+    })
+
+    # 详情内容（如果太长，分片）
+    if len(detail_content) > 4000:
+        # 分片处理
+        chunks = []
+        current_chunk = []
+        current_len = 0
+        for section in detail_content.split("\n\n"):
+            section_len = len(section) + 2
+            if current_len + section_len > 4000 and current_chunk:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = [section]
+                current_len = section_len
+            else:
+                current_chunk.append(section)
+                current_len += section_len
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+
+        for i, chunk in enumerate(chunks):
+            summary_elements.append({
+                "tag": "markdown",
+                "content": f"**详情 ({i+1}/{len(chunks)})**\n\n{chunk}",
+            })
+    else:
+        summary_elements.append({
+            "tag": "markdown",
+            "content": detail_content,
+        })
+
+    # 页脚
     footer = (
         "---\n"
         f"📈 数据更新: {update_time}\n"
         f"📌 v2.0 | 明策智能助手\n"
-        "⚠️ 本报告由AI生成，仅供参考，不构成投资建议\n"
+        "⚠️ **风险提示**: 本报告由AI生成，所有分析仅供参考，不构成任何投资建议。投资有风险，入市需谨慎。\n"
         "💬 @机器人发送「帮助」查看全部指令"
     )
-    sections.append(footer)
-
-    # 清理卡片中的英文残留
-    card_text = "\n\n".join(sections)
-    card_text = card_text.replace("None", "暂无数据")
-    card_text = card_text.replace("null", "暂无数据")
-    card_text = card_text.replace("True", "是")
-    card_text = card_text.replace("False", "否")
-    sections = card_text.split("\n\n")
+    summary_elements.append({"tag": "markdown", "content": footer})
 
     title_text = f"📊 {report_date} 日报详情{' ' + version if version else ''}"
-    # 版本名英文→中文
     version_labels = {"close": "收盘", "morning": "早盘", "noon": "午间", "early": "隔夜"}
     v_label = version_labels.get(version, version)
     title_text = f"📊 {report_date} 日报详情（{v_label}）"
     if not data.get("is_trading_day", True):
         title_text += " 🏖️ 非交易日"
+
     return {
         "header": {
             "template": "turquoise",
             "title": {"tag": "plain_text", "content": title_text},
         },
-        "elements": [{"tag": "markdown", "content": "\n\n".join(sections)}],
+        "elements": summary_elements,
     }

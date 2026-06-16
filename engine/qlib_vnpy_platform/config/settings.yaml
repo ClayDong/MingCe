@@ -132,3 +132,6 @@ monitor:
   disk_threshold: 90.0  # 磁盘使用率告警阈值（百分比）
   check_interval: 300  # 检查间隔（秒）
   alert_cooldown: 3600  # 告警冷却时间（秒）
+
+# ==================== 策略配置（外置 YAML） ====================
+strategy_config: config/strategy_defaults.yaml

@@ -418,12 +418,13 @@ class FundMonitor:
         
         return alerts
     
-    def run_monitor(self) -> Dict:
-        """运行完整监控"""
+    async def run_monitor(self) -> Dict:
+        """运行完整监控（异步版本）"""
         logger.info("Running fund monitor...")
         
-        # 获取数据
-        self.fetch_fund_data()
+        # 获取数据（通过线程池避免阻塞）
+        import asyncio
+        await asyncio.get_event_loop().run_in_executor(None, self.fetch_fund_data)
         if not self.fund_data:
             logger.warning("No fund data available, monitor skipped")
             return {"status": "error", "message": "无法获取基金数据"}

@@ -66,14 +66,21 @@ def _cached(key: str, ttl_seconds: Optional[int] = None, module_name: Optional[s
     return decorator
 
 
-def _try_sources(*source_funcs):
-    """尝试多个数据源，返回第一个成功且非空的结果。"""
+def _try_sources(*source_funcs, module_name: str = None):
+    """尝试多个数据源，返回第一个成功且非空的结果。
+    
+    Args:
+        source_funcs: 数据源函数列表（按优先级）
+        module_name: 可选，数据模块名。提供后自动检查数据质量，
+                     低于 DATA_QUALITY_MIN_ACCEPTABLE_SCORE 时触发降级
+    """
     monitor = get_monitor()
+    validator = get_validator()
     
     for idx, func in enumerate(source_funcs):
         source_name = func.__name__
         
-        # 检查是否应该跳过该数据源（熔断器模式）
+        # 检查熔断器
         if monitor.should_skip(source_name):
             logger.warning(f"Source {source_name}: skipping due to health status")
             continue
@@ -83,6 +90,23 @@ def _try_sources(*source_funcs):
             if result is not None and not (isinstance(result, pd.DataFrame) and result.empty):
                 monitor.record_success(source_name)
                 logger.debug(f"Source {source_name} succeeded")
+                
+                # 数据质量门禁：低于阈值时触发降级到缓存
+                if module_name:
+                    report = get_latest_quality_report(module_name)
+                    if report and report.metrics.overall_score < settings.DATA_QUALITY_MIN_ACCEPTABLE_SCORE:
+                        logger.warning(
+                            f"⚠️ Data quality for {module_name} "
+                            f"({report.metrics.overall_score:.2f}) below threshold "
+                            f"({settings.DATA_QUALITY_MIN_ACCEPTABLE_SCORE}) — data may be stale"
+                        )
+                        # 检查是否有缓存可用
+                        cache = _get_cache()
+                        cached = cache.get(module_name)
+                        if cached is not None:
+                            logger.info(f"Using cached data for {module_name} due to low quality")
+                            return cached
+                
                 return result
         except Exception as e:
             monitor.record_failure(source_name, str(e))
@@ -104,9 +128,13 @@ def _validate_index_value(value: float, name: str) -> bool:
     """验证指数值是否有效。"""
     if value is None:
         return False
+    if not isinstance(value, (int, float)):
+        return False
     if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
         return False
-    return abs(value) >= settings.MIN_INDEX_VALUE_THRESHOLD
+    if isinstance(value, int) and (np.isnan(float(value)) or np.isinf(float(value))):
+        return False
+    return abs(float(value)) >= settings.MIN_INDEX_VALUE_THRESHOLD
 
 
 # ── 数据源函数（同步） ─────────────────────────────────────
@@ -148,10 +176,24 @@ def _fetch_bse_index_bjdirect() -> Optional[pd.DataFrame]:
                 top5_avg_change = top5[chg_col].mean()
                 
                 # 北证50指数通常在700-1200点之间
-                base_value = 1000.0
-                estimated_value = base_value * (1 + top5_avg_change / 100)
+                # 优先使用 ak.stock_zh_index_daily_em 获取真实北证50指数
+                try:
+                    real_index = ak.stock_zh_index_daily_em(symbol="899050")
+                    if real_index is not None and not real_index.empty:
+                        last_close = safe_float(real_index.iloc[-1].get("close", 0))
+                        if _validate_index_value(last_close, "北证50"):
+                            logger.info(f"BSE index fetched from real data: {last_close:.2f}")
+                            base_value = last_close
+                            estimated_value = last_close * (1 + top5_avg_change / 100)
+                        else:
+                            raise ValueError("Invalid value")
+                    else:
+                        raise ValueError("Empty data")
+                except Exception:
+                    base_value = 1000.0
+                    estimated_value = base_value * (1 + top5_avg_change / 100)
                 
-                logger.info(f"BSE index estimated from top 50 stocks, avg change: {top5_avg_change:.2f}%")
+                logger.info(f"BSE index {'estimated' if base_value == 1000 else 'from real data'}: {estimated_value:.2f}")
                 
                 return pd.DataFrame([{
                     "名称": "北证50",
@@ -936,7 +978,7 @@ def get_global_macro() -> dict:
             df = ak.futures_foreign_hist(symbol=sym)
             if df is not None and not df.empty:
                 price = safe_float(df["close"].iloc[-1])
-                if price:
+                if price is not None and price != 0:
                     # 黄金取整数，银/油取两位小数
                     format_str = f"{price:.0f}" if attr == "gold" else f"{price:.2f}"
                     setattr(result, attr, format_str)
@@ -950,7 +992,7 @@ def get_global_macro() -> dict:
             for _, row in df.iterrows():
                 name = safe_str(row.get("名称", ""))
                 price = safe_float(row.get("最新价", row.get("price", 0)))
-                if price:
+                if price is not None and price != 0:
                     if "美国" in name:
                         if "10年" in name and not result.us_10y_bond:
                             result.us_10y_bond = f"{price:.2f}"
@@ -976,7 +1018,7 @@ def get_global_macro() -> dict:
                     records = _json.loads("[" + match.group(1) + "]")
                     if records and len(records) > 0:
                         price = safe_float(records[-1][2])
-                        if price:
+                        if price is not None and price != 0:
                             setattr(result, attr, format(price, fmt))
         except Exception as e:
             logger.debug(f"Forex {sym} failed: {e}")
@@ -990,7 +1032,7 @@ def get_global_macro() -> dict:
             records = _json.loads(match.group(0))
             if records and len(records) > 0:
                 price = safe_float(records[-1][2])
-                if price:
+                if price is not None and price != 0:
                     result.vix = f"{price:.2f}"
     except Exception as e:
         logger.debug(f"VIX fetch failed: {e}")
@@ -1374,7 +1416,7 @@ def get_us_market() -> dict:
                     name = safe_str(row.get("名称", ""))
                     price = safe_float(row.get("最新价", 0))
                     chg = safe_pct(row.get("涨跌幅", 0))
-                    if price and price > 10:
+                    if price is not None and price > 10:
                         if name in ("道琼斯", "标普500", "纳斯达克"):
                             # 去重
                             existing_names = {idx.name for idx in result.indices}
@@ -1446,7 +1488,7 @@ def get_us_market() -> dict:
                     name = safe_str(row.get("名称", ""))
                     price = safe_float(row.get("最新价", 0))
                     chg = safe_pct(row.get("涨跌幅", 0))
-                    if price and price > 5 and name not in ("道琼斯", "标普500", "纳斯达克", "VIX"):
+                    if price is not None and price > 5 and name not in ("道琼斯", "标普500", "纳斯达克", "VIX"):
                         result.top_stocks.append(USStockData(name=name, value=price, change_pct=chg))
                 result.top_stocks = sorted(result.top_stocks, key=lambda x: abs(x.change_pct), reverse=True)[:10]
         except Exception as e3:
@@ -1460,14 +1502,16 @@ def get_us_market() -> dict:
 @_cached("crypto", ttl_seconds=settings.CACHE_TTL_CRYPTO, module_name="crypto")
 @retry(max_retries=1, delay=1.0, backoff=2.0)
 def get_crypto_data() -> dict:
-    """加密货币数据：BTC / ETH 实时行情。"""
+    """加密货币数据：BTC / ETH 实时行情（多源回退）。"""
     from models.schemas import CryptoData
     logger.info("Fetching crypto data...")
     result = CryptoData()
+    fetched = False
 
     if not settings.ENABLE_CRYPTO:
         return result.model_dump()
 
+    # 源1: akshare crypto_js_spot（首选）
     try:
         df = ak.crypto_js_spot()
         if df is not None and not df.empty:
@@ -1476,13 +1520,35 @@ def get_crypto_data() -> dict:
                 price = safe_float(row.get("最近报价", 0))
                 chg = safe_pct(row.get("涨跌幅", 0))
                 if "BTC" in name.upper():
-                    result.btc_price = f"{price:,.0f}" if price and price > 1 else f"{price}"
+                    result.btc_price = f"{price:,.0f}" if price is not None and price > 1 else f"{price}"
                     result.btc_change = chg
+                    fetched = True
                 elif "ETH" in name.upper():
-                    result.eth_price = f"{price:,.0f}" if price and price > 1 else f"{price}"
+                    result.eth_price = f"{price:,.0f}" if price is not None and price > 1 else f"{price}"
                     result.eth_change = chg
+                    fetched = True
     except Exception as e:
         logger.warning(f"Failed to fetch crypto_js_spot: {e}")
+
+    # 源2: CoinGecko API（回退，当日美盘时段更准确）
+    if not fetched or result.btc_price is None:
+        try:
+            import httpx as _httpx
+            cg_url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true"
+            cg_resp = _httpx.get(cg_url, headers={"Accept": "application/json"}, timeout=10)
+            if cg_resp.status_code == 200:
+                cg_data = cg_resp.json()
+                btc = cg_data.get("bitcoin", {})
+                eth = cg_data.get("ethereum", {})
+                if btc.get("usd"):
+                    result.btc_price = f"{btc['usd']:,.0f}"
+                    result.btc_change = btc.get("usd_24h_change")
+                    fetched = True
+                if eth.get("usd"):
+                    result.eth_price = f"{eth['usd']:,.0f}"
+                    result.eth_change = eth.get("usd_24h_change")
+        except Exception as e:
+            logger.debug(f"Failed to fetch CoinGecko crypto fallback: {e}")
 
     if result.btc_change is not None:
         direction = "上涨" if result.btc_change >= 0 else "下跌"
@@ -1490,6 +1556,10 @@ def get_crypto_data() -> dict:
     if result.eth_change is not None:
         direction = "上涨" if result.eth_change >= 0 else "下跌"
         result.highlights.append(f"ETH 24h {direction} {abs(result.eth_change):.2f}%")
+
+    if not fetched:
+        logger.warning("所有加密货币数据源均失败")
+        result.highlights.append("⚠️ 加密货币数据暂不可用")
 
     return result.model_dump()
 
@@ -1508,7 +1578,8 @@ def get_futures_data() -> dict:
         return result.model_dump()
 
     # 关注的关键品种
-    target_futures = ["铁矿石", "螺纹钢", "碳酸锂", "生猪", "沪铜", "沪铝", "焦煤", "纯碱", "玻璃"]
+    # 可配置：通过 settings.TARGET_FUTURES 覆盖
+    target_futures = getattr(settings, "TARGET_FUTURES", ["铁矿石", "螺纹钢", "碳酸锂", "生猪", "沪铜", "沪铝", "焦煤", "纯碱", "玻璃"])
 
     try:
         df = ak.futures_zh_realtime()
@@ -1522,7 +1593,7 @@ def get_futures_data() -> dict:
                     if t in name:
                         price = safe_float(row.get(price_col, 0))
                         chg = safe_pct(row.get(chg_col, 0) if chg_col else 0)
-                        if price and price > 0.001:
+                        if price is not None and price > 0.001:
                             result.items.append({
                                 "name": name,
                                 "price": f"{price:.2f}" if price < 1000 else f"{price:.0f}",
@@ -1545,7 +1616,7 @@ def get_futures_data() -> dict:
                         if t in name:
                             price = safe_float(row.get("最新价", row.get("price", 0)))
                             chg = safe_pct(row.get("涨跌幅", row.get("change_pct", 0)))
-                            if price and price > 0.001:
+                            if price is not None and price > 0.001:
                                 result.items.append({
                                     "name": name,
                                     "price": f"{price:.2f}" if price < 1000 else f"{price:.0f}",
@@ -1749,7 +1820,7 @@ def _extend_global_macro(result):
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
                     price = safe_float(row.get("价格", row.get("最新价", 0)))
-                    if price:
+                    if price is not None and price != 0:
                         result.silver = f"{price:.2f}"
                         break
         except Exception as e:

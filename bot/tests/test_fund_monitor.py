@@ -295,14 +295,15 @@ class TestBuildFundMonitorCard(unittest.TestCase):
 
 class TestMonitorRun(unittest.TestCase):
     """监控运行测试（不实际获取数据）"""
-    
+
     def test_run_monitor_no_data(self):
         """获取数据失败时，返回错误状态"""
         # 由于网络问题可能导致获取失败，这个测试验证错误处理
+        import asyncio
         config = FundMonitorConfig(fund_code="INVALID_CODE")
         monitor = FundMonitor(config)
-        # 模拟 fetch_fund_data 返回 None
-        result = monitor.run_monitor()
+        # 模拟 fetch_fund_data 返回 None（run_monitor 为异步方法）
+        result = asyncio.run(monitor.run_monitor())
         # 无论成功与否，都应该有结果
         self.assertIn("status", result)
 

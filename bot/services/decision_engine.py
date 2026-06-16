@@ -10,10 +10,6 @@
 供 Feishu Bot 和日报系统调用。
 """
 
-import sys
-import os
-import json
-import time
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -21,23 +17,15 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 from loguru import logger
 
-# MakingMoney 导入
-_MAKINGMONEY_PATH = Path(os.environ.get("MAKINGMONEY_DIR", Path(__file__).resolve().parent.parent.parent))
-if str(_MAKINGMONEY_PATH) not in sys.path:
-    sys.path.insert(0, str(_MAKINGMONEY_PATH))
+# MakingMoney 策略信号 — 通过 strategy_adapter 获取，不直接 import engine/
+# 保持双系统解耦：bot/ 和 engine/ 通过 HTTP/subprocess 通信
+_MAKINGMONEY_AVAILABLE = False  # 由 strategy_adapter 管理
+_ALL_STRATEGY_KEYS = []
 
-try:
-    from qlib_vnpy_platform.core.strategies import get_strategy, STRATEGY_REGISTRY
-    from qlib_vnpy_platform.core.regime_detector import MarketRegimeDetector, StrategySelector
-    from qlib_vnpy_platform.core.backtest import BacktestEngine
-
-    _MAKINGMONEY_AVAILABLE = True
-    _ALL_STRATEGY_KEYS = list(STRATEGY_REGISTRY.keys())
-    logger.info(f"✅ MakingMoney 策略引擎加载: {len(_ALL_STRATEGY_KEYS)} 个策略")
-except ImportError as e:
-    _MAKINGMONEY_AVAILABLE = False
-    _ALL_STRATEGY_KEYS = []
-    logger.warning(f"⚠️ MakingMoney 不可用: {e}")
+# 延迟导入 strategy_adapter，避免循环依赖
+def _get_strategy_adapter():
+    from services.strategy_adapter import get_adapter
+    return get_adapter()
 
 
 # ═══ 个股数据获取 ═══
@@ -50,6 +38,10 @@ def _symbol_to_sina(symbol: str) -> str:
         return f"sh{symbol[2:]}"
     elif symbol.startswith("BJ"):
         return f"bj{symbol[2:]}"
+    elif symbol.startswith("HK"):
+        return symbol  # 港股代码保留原样
+    elif symbol.startswith("US_"):
+        return symbol[3:]  # 美股代码去掉 US_ 前缀
     else:
         if symbol.startswith("6"):
             return f"sh{symbol}"
@@ -58,6 +50,8 @@ def _symbol_to_sina(symbol: str) -> str:
 
 def _symbol_to_tencent(symbol: str) -> str:
     """将 SZ002594 格式转为腾讯格式 sz002594 / sh600519"""
+    if symbol.startswith("US_"):
+        return symbol[3:]  # 美股代码去掉 US_ 前缀
     return _symbol_to_sina(symbol)
 
 
@@ -204,47 +198,46 @@ def calc_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 # ═══ 策略信号生成 ═══
 
-def generate_signals(df: pd.DataFrame) -> list[dict]:
-    """对单只股票运行所有策略，返回信号列表。"""
-    if not _MAKINGMONEY_AVAILABLE or df.empty or len(df) < 30:
-        # 降级：使用本地技术指标生成信号
+def generate_signals(df: pd.DataFrame) -> dict:
+    """对单只股票运行所有策略，返回信号列表。
+
+    通过 strategy_adapter 获取信号，保持双系统解耦。
+    如果 adapter 不可用或数据不足，降级到本地计算。
+    """
+    if df.empty or len(df) < 30:
         return _generate_fallback_signals(df)
 
-    signals = []
-    
-    # 市场状态检测
-    detector = MarketRegimeDetector()
-    regime = detector.detect(df)
-    
-    # 运行所有策略
-    all_strategies = [get_strategy(key) for key in _ALL_STRATEGY_KEYS if get_strategy(key)]
-    engine = BacktestEngine()
-    results = engine.run_multiple(df, all_strategies, df.get("symbol", "UNKNOWN"))
-    
-    # 策略选择器
-    selector = StrategySelector()
-    top_picks = selector.select_best(df, results, top_n=5)
-    
-    for r in results:
-        if "error" in r:
-            continue
-        ls = r.get("latest_signals", {})
-        signal_val = ls.get("signal", 0) if ls else 0
-        if signal_val != 0:
-            signals.append({
-                "strategy": r["strategy"]["name"],
-                "strategy_key": r["strategy"].get("key", ""),
-                "signal": signal_val,
-                "action": "买入" if signal_val > 0 else ("卖出" if signal_val < 0 else "持有"),
-                "price": ls.get("close", df.iloc[-1]["close"]) if ls else df.iloc[-1]["close"],
-                "signal_strength": ls.get("signal_strength", 0.5) if ls else 0.5,
-            })
+    # 优先通过 strategy_adapter（HTTP/subprocess）获取信号
+    try:
+        adapter = _get_strategy_adapter()
+        symbol = df.get("symbol", "UNKNOWN")
+        if isinstance(symbol, pd.Series):
+            symbol = symbol.iloc[0] if not symbol.empty else "UNKNOWN"
+        adapter_result = adapter.get_signals([str(symbol)])
+        if adapter_result and str(symbol) in adapter_result:
+            data = adapter_result[str(symbol)]
+            # 转换格式为统一的信号列表
+            signals_raw = data.get("signals", data.get("all_signals", []))
+            if signals_raw:
+                regime = data.get("regime", {"regime": "unknown"})
+                signals = []
+                for s in signals_raw[:10]:  # 取前 10 个最强的
+                    signal_val = s.get("signal", 0)
+                    if signal_val != 0:
+                        signals.append({
+                            "strategy": s.get("strategy", s.get("strategy_name", "策略")),
+                            "strategy_key": s.get("strategy_key", ""),
+                            "signal": signal_val,
+                            "action": "买入" if signal_val > 0 else "卖出",
+                            "price": s.get("price", df.iloc[-1]["close"]),
+                            "signal_strength": s.get("signal_strength", 0.5),
+                        })
+                return {"regime": regime, "top_picks": data.get("top_picks", []), "signals": signals}
+    except Exception as e:
+        logger.debug(f"strategy_adapter 信号获取失败，降级到本地计算: {e}")
 
-    return {
-        "regime": regime,
-        "top_picks": top_picks,
-        "signals": signals,
-    }
+    # 降级：使用本地技术指标生成信号
+    return _generate_fallback_signals(df)
 
 
 def _generate_fallback_signals(df: pd.DataFrame) -> dict:
@@ -321,37 +314,85 @@ def _generate_fallback_signals(df: pd.DataFrame) -> dict:
 
 # ═══ 综合决策 ═══
 
+def _fetch_stock_data_sync(symbol: str, days: int = 365) -> pd.DataFrame:
+    """同步获取股票数据（直接调用，已在外层线程池中运行）。"""
+    return fetch_stock_data(symbol, days)
+
+
+def _get_holdings_sync() -> list:
+    """同步获取持仓（避免在事件循环中调用 run_until_complete）"""
+    try:
+        from services.portfolio_manager import get_holdings
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 在事件循环中：用线程池避免死锁
+                future = asyncio.run_coroutine_threadsafe(get_holdings(), loop)
+                return future.result(timeout=10)
+            return loop.run_until_complete(get_holdings())
+        except RuntimeError:
+            # 无事件循环
+            return asyncio.run(get_holdings())
+    except Exception as e:
+        logger.debug(f"获取持仓失败: {e}")
+        return []
+
+
+def _get_watchlist_sync() -> list:
+    """同步获取自选股（避免在事件循环中调用 run_until_complete）"""
+    try:
+        from services.portfolio_manager import get_watchlist
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(get_watchlist(), loop)
+                return future.result(timeout=10)
+            return loop.run_until_complete(get_watchlist())
+        except RuntimeError:
+            return asyncio.run(get_watchlist())
+    except Exception as e:
+        logger.debug(f"获取自选股失败: {e}")
+        return []
+
+
 def analyze_stock(symbol: str, name: str = "", macro_data: dict = None) -> dict:
-    """综合宏观+技术分析一只股票。"""
-    df = fetch_stock_data(symbol)
+    """综合宏观+技术分析一只股票（同步接口，内部用线程池获取数据）。"""
+    # 用线程池获取数据，避免阻塞事件循环
+    import asyncio
+    df = _fetch_stock_data_sync(symbol)
     if df.empty:
         return {"symbol": symbol, "name": name, "error": "无法获取数据"}
-    
+
     # 技术指标计算
     df = calc_technical_indicators(df)
     latest = df.iloc[-1]
-    
-    # 策略信号
+
+    # 策略信号（通过 strategy_adapter 获取，保持解耦）
     signal_result = generate_signals(df)
-    
-    # 持仓盈亏（如果有）
-    from services.portfolio_manager import get_holdings
-    holdings = get_holdings()
+
+    # 持仓盈亏（如果有）- 同步获取
+    holdings = _get_holdings_sync()
     holding = next((h for h in holdings if h["symbol"] == symbol), None)
     
     pnl_info = None
     if holding:
         current_price = float(latest["close"])
         cost = float(holding["cost_price"])
-        pnl_pct = (current_price - cost) / cost * 100
-        pnl_amount = (current_price - cost) * float(holding["shares"])
-        pnl_info = {
-            "shares": float(holding["shares"]),
-            "cost": cost,
-            "current": current_price,
-            "pnl_pct": round(pnl_pct, 2),
-            "pnl_amount": round(pnl_amount, 2),
-        }
+        # 防除零/NaN
+        if cost > 0 and not (isinstance(cost, float) and (np.isnan(cost) or np.isinf(cost))):
+            pnl_pct = (current_price - cost) / cost * 100
+            pnl_amount = (current_price - cost) * float(holding["shares"])
+            pnl_info = {
+                "shares": float(holding["shares"]),
+                "cost": cost,
+                "current": current_price,
+                "pnl_pct": round(pnl_pct if not (np.isnan(pnl_pct) or np.isinf(pnl_pct)) else 0, 2),
+                "pnl_amount": round(pnl_amount if not (np.isnan(pnl_amount) or np.isinf(pnl_amount)) else 0, 2),
+            }
+        else:
+            logger.warning(f"Invalid cost price for {symbol}: {cost}")
     
     # 风险判断
     atr_pct = float(latest.get("atr_pct", 0))
@@ -389,10 +430,8 @@ def analyze_stock(symbol: str, name: str = "", macro_data: dict = None) -> dict:
 
 def get_portfolio_summary(macro_data: dict = None) -> dict:
     """获取完整持仓概览（含每只持仓信号）。"""
-    from services.portfolio_manager import get_holdings, get_watchlist
-    
-    holdings = get_holdings()
-    watchlist = get_watchlist()
+    holdings = _get_holdings_sync()
+    watchlist = _get_watchlist_sync()
     
     total_investment = 0
     total_current = 0
@@ -408,15 +447,23 @@ def get_portfolio_summary(macro_data: dict = None) -> dict:
     total_pnl = total_current - total_investment
     total_pnl_pct = (total_pnl / total_investment * 100) if total_investment > 0 else 0
     
+    # 防 NaN/Inf
+    if isinstance(total_pnl_pct, float) and (np.isnan(total_pnl_pct) or np.isinf(total_pnl_pct)):
+        total_pnl_pct = 0.0
+    
     # 计算风险集中度
+    concentration = 0
     if stock_analyses:
-        max_position = max(
-            (a["holding"]["current"] * a["holding"]["shares"] for a in stock_analyses if a.get("holding")),
-            default=0,
-        )
-        concentration = (max_position / total_current * 100) if total_current > 0 else 0
-    else:
-        concentration = 0
+        try:
+            max_position = max(
+                (a["holding"]["current"] * a["holding"]["shares"] for a in stock_analyses if a.get("holding")),
+                default=0,
+            )
+            concentration = (max_position / total_current * 100) if total_current > 0 else 0
+            if isinstance(concentration, float) and (np.isnan(concentration) or np.isinf(concentration)):
+                concentration = 0
+        except (TypeError, KeyError, ValueError):
+            pass
     
     return {
         "date": str(date.today()),

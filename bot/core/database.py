@@ -77,8 +77,47 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- 信号生命周期追踪表
+            CREATE TABLE IF NOT EXISTS signal_lifecycle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,             -- 信号唯一ID（uuid）
+                symbol TEXT NOT NULL,                -- 股票代码
+                signal_date TEXT NOT NULL,           -- 信号产生日期
+                direction TEXT NOT NULL,             -- BUY / SELL / HOLD
+                confidence REAL NOT NULL,            -- 置信度 0-1
+                entry_price REAL,                    -- 信号产生时价格
+                strategy_source TEXT,                -- 信号来源（QLib/LLM/融合）
+                market_regime TEXT,                  -- 市场状态
+                status TEXT NOT NULL DEFAULT 'active', -- active / expired / hit_target / hit_stop / closed
+                target_price REAL,                   -- 目标价
+                stop_loss REAL,                      -- 止损价
+                exit_price REAL,                     -- 退出价
+                exit_date TEXT,                      -- 退出日期
+                holding_days INTEGER DEFAULT 0,      -- 持有天数
+                return_pct REAL,                     -- 实际收益率%
+                hit_target INTEGER DEFAULT 0,        -- 是否命中目标 1/0
+                hit_stop INTEGER DEFAULT 0,          -- 是否触发止损 1/0
+                evaluated_at TIMESTAMP,              -- 评估时间
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            -- 任务状态持久化表
+            CREATE TABLE IF NOT EXISTS task_store (
+                task_id TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                result TEXT,
+                error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE INDEX IF NOT EXISTS idx_reports_date ON daily_reports(report_date, version);
             CREATE INDEX IF NOT EXISTS idx_alert_logs_date ON alert_logs(alert_date);
+            CREATE INDEX IF NOT EXISTS idx_signal_lifecycle_symbol ON signal_lifecycle(symbol, signal_date);
+            CREATE INDEX IF NOT EXISTS idx_signal_lifecycle_status ON signal_lifecycle(status, signal_date);
+            CREATE INDEX IF NOT EXISTS idx_signal_lifecycle_date ON signal_lifecycle(signal_date);
         """)
         await self._conn.commit()
 

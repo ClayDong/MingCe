@@ -48,7 +48,7 @@ class RealDataBacktester:
                     end_date=end_date,
                     adjust="qfq"
                 )
-            except:
+            except Exception:
                 df = self.data_bridge.akshare.stock_zh_index_spot_em()
                 df = self._generate_sample_data(days=days, start_price=100, start_date=start_date, name=symbol)
             

@@ -141,6 +141,10 @@ class DataQualityValidator:
             issues.append(f"{name}: 指数值为空")
             return False, issues
         
+        if not isinstance(value, (int, float)):
+            issues.append(f"{name}: 指数值类型无效 ({type(value).__name__})")
+            return False, issues
+
         if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
             issues.append(f"{name}: 指数值无效 ({value})")
             return False, issues
