@@ -1,0 +1,134 @@
+# ==================== LLM 配置 ====================
+llm:
+  api_key: ${LLM_API_KEY}
+  base_url: ${LLM_BASE_URL}
+  model: ${LLM_MODEL}
+  thinking_model: ${LLM_THINKING_MODEL}
+  max_tokens: 4096
+  temperature: 0.3
+  timeout: 60
+qlib:
+  provider_uri: ~/.qlib/qlib_data/cn_data
+  region: cn
+  auto_init: true
+# ==================== 数据源配置 ====================
+data:
+  primary_source: akshare
+  fallback_source: tushare
+  cache_dir: ./data/cache
+  history_days: 365
+  update_interval: 60
+news:
+  source: eastmoney
+  max_news: 10
+  cache_hours: 2
+# ==================== 风控配置 ====================
+risk:
+  max_single_position: 0.3
+  daily_loss_warning: 0.03
+  daily_loss_circuit_breaker: 0.05
+  max_single_loss: 0.02
+  min_confidence: 0.4
+  max_data_missing_rate: 0.001
+  max_sector_concentration: 0.4
+  max_holdings: 20
+signal:
+  weight_qlib: 0.6
+  weight_llm: 0.4
+  buy_threshold: 0.2
+  sell_threshold: -0.2
+  base_risk_ratio: 0.02
+# ==================== 交易配置 ====================
+trading:
+  mode: paper
+  commission_rate: 0.0003
+  slippage: 0.001
+  min_lot_size: 100
+  default_symbol: SZ002594
+# ==================== 日志配置 ====================
+logging:
+  level: INFO
+  file: ./logs/platform.log
+  rotation: 50 MB
+  retention: 30 days
+watchlist:
+  default_stocks:
+  - SZ002594
+
+# ==================== 行业映射配置 ====================
+sector_map:
+  SZ000001: 银行
+  SH600000: 银行
+  SZ000002: 房地产
+  SH601318: 保险
+  SH600519: 白酒
+  SZ000858: 白酒
+  SH600036: 银行
+  SZ002594: 汽车
+  SH601166: 银行
+  SH600016: 银行
+  SZ000333: 家电
+  SH600276: 医药
+  SH601888: 旅游
+  SZ300750: 新能源
+  SH600900: 电力
+  SH600028: 石油
+  SZ002415: 安防
+  SH600031: 机械
+  SH600585: 水泥
+  SZ000568: 白酒
+
+# ==================== 模拟股票参数配置 ====================
+simulated_stocks:
+  SZ002594:
+    base_price: 260
+    volatility: 0.025
+    drift: 0.0003
+    name: 比亚迪
+  SZ000001:
+    base_price: 12
+    volatility: 0.015
+    drift: 0.0001
+    name: 平安银行
+  SH600519:
+    base_price: 1700
+    volatility: 0.02
+    drift: 0.0002
+    name: 贵州茅台
+  SZ300750:
+    base_price: 200
+    volatility: 0.03
+    drift: 0.0004
+    name: 宁德时代
+  SH600036:
+    base_price: 35
+    volatility: 0.018
+    drift: 0.0001
+    name: 招商银行
+
+# ==================== 数据质量监控配置 ====================
+data_quality:
+  enabled: true
+  check_interval: 60  # 分钟
+  alert_threshold: 70  # 低于此分数告警
+  stale_data_days: 5  # 数据过期天数
+  auto_fix_enabled: true  # 自动修复启用
+  max_missing_rate: 0.001  # 最大缺失率 0.1%
+  max_price_change: 0.20  # 最大价格变化率 20%
+  max_volume_change: 10.0  # 最大成交量变化率 10倍
+  enable_feishu_alerts: true  # 启用飞书告警
+  monitor_symbols:
+    - SZ002594
+    - SZ000001
+    - SH600519
+    - SZ300750
+    - SH600036
+
+# ==================== 系统健康监控配置 ====================
+monitor:
+  enabled: true
+  cpu_threshold: 80.0  # CPU使用率告警阈值（百分比）
+  memory_threshold: 85.0  # 内存使用率告警阈值（百分比）
+  disk_threshold: 90.0  # 磁盘使用率告警阈值（百分比）
+  check_interval: 300  # 检查间隔（秒）
+  alert_cooldown: 3600  # 告警冷却时间（秒）

@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>QLib+VNPY 移动端</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #0a0e27; color: #e0e0e0; min-height: 100vh; padding-bottom: 70px; }
+        .header { background: linear-gradient(135deg, #1a1f3a 0%, #0d1229 100%);
+                  padding: 15px; border-bottom: 1px solid #2a2f4a; position: sticky; top: 0; z-index: 100; }
+        .header h1 { font-size: 18px; color: #4fc3f7; margin-bottom: 5px; }
+        .header .subtitle { font-size: 12px; color: #888; }
+        .container { padding: 10px; max-width: 100%; }
+        .card { background: #141832; border: 1px solid #2a2f4a; border-radius: 10px;
+                padding: 12px; margin-bottom: 10px; }
+        .card-title { font-size: 14px; color: #4fc3f7; margin-bottom: 10px; font-weight: bold; }
+        .card-desc { font-size: 11px; color: #888; margin-bottom: 8px; }
+        .btn { padding: 10px 16px; border: none; border-radius: 8px; cursor: pointer;
+               font-size: 14px; transition: all 0.2s; width: 100%; margin-bottom: 8px; font-weight: 500; }
+        .btn-primary { background: #1565c0; color: white; }
+        .btn-primary:active { background: #1976d2; transform: scale(0.98); }
+        .btn-success { background: #2e7d32; color: white; }
+        .btn-success:active { background: #388e3c; transform: scale(0.98); }
+        .btn-danger { background: #c62828; color: white; }
+        .btn-danger:active { background: #d32f2f; transform: scale(0.98); }
+        .btn-warning { background: #f57c00; color: white; }
+        .btn-warning:active { background: #ff9800; transform: scale(0.98); }
+        .btn-secondary { background: #37474f; color: white; }
+        .btn-secondary:active { background: #455a64; transform: scale(0.98); }
+        .btn-row { display: flex; gap: 8px; }
+        .btn-row .btn { flex: 1; margin-bottom: 0; }
+        .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+        .stat-item { background: #1a1f3a; border-radius: 8px; padding: 10px; text-align: center; }
+        .stat-label { font-size: 10px; color: #888; margin-bottom: 4px; }
+        .stat-value { font-size: 16px; font-weight: bold; color: #e0e0e0; }
+        .stat-value.positive { color: #4caf50; }
+        .stat-value.negative { color: #f44336; }
+        .stat-value.info { color: #4fc3f7; }
+        input[type="text"] { width: 100%; padding: 12px; border: 1px solid #2a2f4a; border-radius: 8px;
+                            background: #1a1f3a; color: #e0e0e0; font-size: 14px; margin-bottom: 8px; }
+        .signal-badge { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }
+        .signal-buy { background: rgba(76, 175, 80, 0.2); color: #4caf50; }
+        .signal-sell { background: rgba(244, 67, 54, 0.2); color: #f44336; }
+        .signal-hold { background: rgba(158, 158, 158, 0.2); color: #888; }
+        .strategy-list { max-height: 400px; overflow-y: auto; }
+        .strategy-item { background: #1a1f3a; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+        .strategy-name { font-size: 13px; color: #e0e0e0; margin-bottom: 5px; }
+        .strategy-info { display: flex; justify-content: space-between; font-size: 11px; color: #888; }
+        .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; background: #141832; border-top: 1px solid #2a2f4a;
+                      display: flex; padding: 8px 0; z-index: 1000; }
+        .nav-item { flex: 1; text-align: center; padding: 5px; cursor: pointer; transition: all 0.2s; }
+        .nav-item.active { color: #4fc3f7; }
+        .nav-icon { font-size: 20px; margin-bottom: 3px; }
+        .nav-label { font-size: 10px; color: #888; }
+        .nav-item.active .nav-label { color: #4fc3f7; }
+        .loading { text-align: center; padding: 30px; color: #888; }
+        .error { color: #f44336; text-align: center; padding: 20px; }
+        .success { color: #4caf50; text-align: center; padding: 20px; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .section-title { font-size: 14px; color: #4fc3f7; margin: 15px 0 10px 0; font-weight: bold; }
+        .news-item { background: #1a1f3a; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+        .news-title { font-size: 13px; color: #e0e0e0; margin-bottom: 5px; }
+        .news-meta { font-size: 10px; color: #888; }
+        .refresh-btn { position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+                      background: none; border: none; color: #4fc3f7; font-size: 14px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 QLib+VNPY 量化平台</h1>
+        <div class="subtitle" id="last-update">加载中...</div>
+    </div>
+
+    <div class="container">
+        <div id="tab-overview" class="tab-content active">
+            <div class="card">
+                <div class="card-title">💼 账户概览</div>
+                <div class="stat-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">总资产</div>
+                        <div class="stat-value" id="stat-capital">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">持仓市值</div>
+                        <div class="stat-value" id="stat-position">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">总盈亏</div>
+                        <div class="stat-value" id="stat-pnl">--</div>
+                    </div>
+                </div>
+                <div class="stat-grid">
+                    <div class="stat-item">
+                        <div class="stat-label">模拟盘数</div>
+                        <div class="stat-value info" id="stat-accounts">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">盈利策略</div>
+                        <div class="stat-value positive" id="stat-profitable">--</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-label">亏损策略</div>
+                        <div class="stat-value negative" id="stat-losing">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">🔍 快速分析</div>
+                <input type="text" id="quick-symbol" placeholder="输入股票代码，如 SZ002594" value="SZ002594">
+                <button class="btn btn-primary" onclick="quickAnalyze()">🔍 分析股票</button>
+                <div id="quick-result" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">📈 今日信号 TOP 5</div>
+                <div id="top-signals" class="strategy-list">
+                    <div class="loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-trading" class="tab-content">
+            <div class="card">
+                <div class="card-title">📊 模拟盘交易</div>
+                <div class="card-desc">每策略独立10万，严格按信号交易</div>
+                <input type="text" id="trade-symbol" placeholder="股票代码" value="SZ002594">
+                <button class="btn btn-success" onclick="initPaper()">🆕 初始化账户</button>
+                <button class="btn btn-primary" onclick="runPaper()">📈 执行今日交易</button>
+                <button class="btn btn-secondary" onclick="refreshPaper()">🔄 刷新状态</button>
+                <div id="paper-status" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="section-title">📋 所有策略状态</div>
+            <div id="paper-list" class="strategy-list">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+
+        <div id="tab-monitor" class="tab-content">
+            <div class="card">
+                <div class="card-title">🔬 策略验证</div>
+                <div class="card-desc">样本外验证 + 参数敏感性分析</div>
+                <input type="text" id="validation-symbol" placeholder="股票代码" value="SZ002594">
+                <button class="btn btn-warning" onclick="runValidation()">🔬 运行验证</button>
+                <div id="validation-result" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="section-title">📊 验证结果排名</div>
+            <div id="validation-list" class="strategy-list">
+                <div class="loading">点击上方按钮运行验证</div>
+            </div>
+        </div>
+
+        <div id="tab-logs" class="tab-content">
+            <div class="card">
+                <div class="card-title">📋 系统日志</div>
+                <button class="btn btn-secondary" onclick="refreshLogs()">🔄 刷新日志</button>
+                <div id="log-output" style="margin-top: 10px; max-height: 500px; overflow-y: auto; background: #0a0e27; border-radius: 8px; padding: 10px; font-size: 11px;">
+                    <div style="color: #888">点击刷新查看日志</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="bottom-nav">
+        <div class="nav-item active" onclick="switchTab('overview')">
+            <div class="nav-icon">📊</div>
+            <div class="nav-label">概览</div>
+        </div>
+        <div class="nav-item" onclick="switchTab('trading')">
+            <div class="nav-icon">💰</div>
+            <div class="nav-label">交易</div>
+        </div>
+        <div class="nav-item" onclick="switchTab('monitor')">
+            <div class="nav-icon">🔬</div>
+            <div class="nav-label">验证</div>
+        </div>
+        <div class="nav-item" onclick="switchTab('logs')">
+            <div class="nav-icon">📋</div>
+            <div class="nav-label">日志</div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        function formatMoney(n) {
+            if (n === null || n === undefined) return '--';
+            return '¥' + Number(n).toLocaleString('zh-CN', {minimumFractionDigits: 0, maximumFractionDigits: 0});
+        }
+
+        function formatPercent(n) {
+            if (n === null || n === undefined) return '--';
+            return (Number(n) >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
+        }
+
+        function getSignalClass(signal) {
+            if (signal === 1) return 'signal-buy';
+            if (signal === -1) return 'signal-sell';
+            return 'signal-hold';
+        }
+
+        function getSignalText(signal) {
+            if (signal === 1) return '买入';
+            if (signal === -1) return '卖出';
+            return '持有';
+        }
+
+        function normalizeSymbol(s) {
+            s = s.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+            if (/^\d{6}$/.test(s)) {
+                s = (s.startsWith('6') || s.startsWith('9')) ? 'SH' + s : 'SZ' + s;
+            }
+            return s;
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.add('active');
+            event.currentTarget.classList.add('active');
+
+            if (tabName === 'overview') loadOverview();
+            if (tabName === 'trading') refreshPaper();
+            if (tabName === 'logs') refreshLogs();
+        }
+
+        async function loadOverview() {
+            try {
+                const resp = await fetch(API_BASE + '/api/status');
+                const data = await resp.json();
+
+                document.getElementById('stat-capital').textContent = formatMoney(data.account?.total_capital);
+                document.getElementById('stat-position').textContent = formatMoney(data.account?.position_value);
+                const pnlEl = document.getElementById('stat-pnl');
+                pnlEl.textContent = formatMoney(data.account?.total_pnl) + ' (' + formatPercent(data.account?.total_pnl_pct) + ')';
+                pnlEl.className = 'stat-value ' + (data.account?.total_pnl >= 0 ? 'positive' : 'negative');
+
+                document.getElementById('last-update').textContent = new Date().toLocaleString('zh-CN');
+            } catch (e) {
+                console.error('Load overview failed:', e);
+            }
+
+            try {
+                const resp = await fetch(API_BASE + '/api/paper/status?symbol=SZ002594');
+                const data = await resp.json();
+                if (data.summary) {
+                    document.getElementById('stat-accounts').textContent = data.summary.total_strategies || 0;
+                    document.getElementById('stat-profitable').textContent = data.summary.profitable_count || 0;
+                    document.getElementById('stat-losing').textContent = data.summary.losing_count || 0;
+                }
+            } catch (e) {
+                console.error('Load paper status failed:', e);
+            }
+
+            loadTopSignals();
+        }
+
+        async function loadTopSignals() {
+            try {
+                const resp = await fetch(API_BASE + '/api/strategy/monitor/latest?symbol=SZ002594');
+                const data = await resp.json();
+                const container = document.getElementById('top-signals');
+
+                let signals = data.signals || data.current_signals || [];
+
+                if (!signals || signals.length === 0) {
+                    container.innerHTML = '<div style="color:#888;text-align:center;padding:20px">暂无信号数据</div>';
+                    return;
+                }
+
+                const topSignals = signals.slice(0, 5);
+                container.innerHTML = topSignals.map(s => {
+                    const signalClass = getSignalClass(s.signal);
+                    const signalText = getSignalText(s.signal);
+                    return '<div class="strategy-item">' +
+                        '<div class="strategy-name">' + (s.strategy || 'Unknown') + '</div>' +
+                        '<div class="strategy-info">' +
+                        '<span class="signal-badge ' + signalClass + '">' + signalText + '</span>' +
+                        '<span>置信度: ' + formatPercent((s.signal_strength || 0) * 100) + '</span>' +
+                        '</div></div>';
+                }).join('');
+            } catch (e) {
+                document.getElementById('top-signals').innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function quickAnalyze() {
+            const symbol = normalizeSymbol(document.getElementById('quick-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+
+            const resultDiv = document.getElementById('quick-result');
+            resultDiv.innerHTML = '<div class="loading">分析中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/analyze', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol})
+                });
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    resultDiv.innerHTML = '<div class="error">❌ ' + (data.error || '分析失败') + '</div>';
+                    return;
+                }
+
+                const signal = data.signal;
+                const signalClass = signal?.direction === 'BUY' ? 'signal-buy' : signal?.direction === 'SELL' ? 'signal-sell' : 'signal-hold';
+                const signalText = signal?.direction === 'BUY' ? '买入' : signal?.direction === 'SELL' ? '卖出' : '持有';
+
+                resultDiv.innerHTML = '<div class="strategy-item">' +
+                    '<div class="strategy-name">分析结果: ' + symbol + '</div>' +
+                    '<div class="strategy-info">' +
+                    '<span class="signal-badge ' + signalClass + '">' + signalText + '</span>' +
+                    '<span>置信度: ' + formatPercent((signal?.confidence || 0) * 100) + '</span>' +
+                    '</div></div>';
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="error">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function initPaper() {
+            const symbol = normalizeSymbol(document.getElementById('trade-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+            if (!confirm('确定要初始化 ' + symbol + ' 的模拟盘？')) return;
+
+            const statusDiv = document.getElementById('paper-status');
+            statusDiv.innerHTML = '<div class="loading">初始化中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/paper/init', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol, reset: true})
+                });
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    statusDiv.innerHTML = '<div class="error">❌ ' + (data.error || '初始化失败') + '</div>';
+                    return;
+                }
+
+                statusDiv.innerHTML = '<div class="success">✅ 已初始化 ' + data.accounts.length + ' 个策略账户</div>';
+                refreshPaper();
+            } catch (e) {
+                statusDiv.innerHTML = '<div class="error">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function runPaper() {
+            const symbol = normalizeSymbol(document.getElementById('trade-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+
+            const statusDiv = document.getElementById('paper-status');
+            statusDiv.innerHTML = '<div class="loading">执行中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/paper/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol})
+                });
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    statusDiv.innerHTML = '<div class="error">❌ ' + (data.error || '执行失败') + '</div>';
+                    return;
+                }
+
+                statusDiv.innerHTML = '<div class="success">✅ 执行完成</div>';
+                refreshPaper();
+            } catch (e) {
+                statusDiv.innerHTML = '<div class="error">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function refreshPaper() {
+            const symbol = normalizeSymbol(document.getElementById('trade-symbol').value);
+            const container = document.getElementById('paper-list');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/paper/status?symbol=' + symbol);
+                const data = await resp.json();
+
+                if (!data.accounts || data.accounts.length === 0) {
+                    container.innerHTML = '<div style="color:#888;text-align:center;padding:20px">暂无模拟盘数据，请先初始化</div>';
+                    return;
+                }
+
+                container.innerHTML = data.accounts.map(a => {
+                    const pnlClass = (a.total_pnl || 0) >= 0 ? 'positive' : 'negative';
+                    const signalClass = getSignalClass(a.last_signal_value);
+                    const signalText = getSignalText(a.last_signal_value);
+                    return '<div class="strategy-item">' +
+                        '<div class="strategy-name">' + (a.strategy_key || 'Unknown') + '</div>' +
+                        '<div class="strategy-info">' +
+                        '<span>总资产: ' + formatMoney(a.total_equity) + '</span>' +
+                        '<span class="' + pnlClass + '">盈亏: ' + formatPercent(a.total_pnl_pct) + '</span>' +
+                        '</div>' +
+                        '<div class="strategy-info" style="margin-top:5px;">' +
+                        '<span class="signal-badge ' + signalClass + '">' + signalText + '</span>' +
+                        '<span>交易: ' + (a.trade_count || 0) + '次</span>' +
+                        '</div></div>';
+                }).join('');
+            } catch (e) {
+                container.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function runValidation() {
+            const symbol = normalizeSymbol(document.getElementById('validation-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+
+            const resultDiv = document.getElementById('validation-result');
+            const listDiv = document.getElementById('validation-list');
+            resultDiv.innerHTML = '<div class="loading">验证中...（可能需要较长时间）</div>';
+            listDiv.innerHTML = '<div class="loading">运行中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/validation/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol, strategies: ['ma_cross', 'rsi', 'macd', 'bollinger', 'momentum', 'kdj', 'dual_thrust', 'turtle', 'mean_reversion']})
+                });
+                const data = await resp.json();
+
+                if (!resp.ok) {
+                    resultDiv.innerHTML = '<div class="error">❌ ' + (data.error || '验证失败') + '</div>';
+                    return;
+                }
+
+                resultDiv.innerHTML = '<div class="success">✅ 验证完成，共 ' + data.results.length + ' 个策略</div>';
+
+                const sorted = data.results.sort((a, b) => (b.validation_score || 0) - (a.validation_score || 0));
+                listDiv.innerHTML = sorted.map(r => {
+                    const score = r.validation_score || 0;
+                    const scoreClass = score >= 60 ? 'positive' : score >= 40 ? '' : 'negative';
+                    const strategyName = r.strategy?.name || r.strategy_key || 'Unknown';
+                    return '<div class="strategy-item">' +
+                        '<div class="strategy-name">' + strategyName + '</div>' +
+                        '<div class="strategy-info">' +
+                        '<span>评分: </span>' +
+                        '<span class="' + scoreClass + '" style="font-weight:bold">' + score + '</span>' +
+                        '</div></div>';
+                }).join('');
+            } catch (e) {
+                resultDiv.innerHTML = '<div class="error">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function refreshLogs() {
+            const container = document.getElementById('log-output');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+
+            try {
+                const resp = await fetch(API_BASE + '/api/logs?lines=50');
+                const data = await resp.json();
+
+                if (!data.entries || data.entries.length === 0) {
+                    container.innerHTML = '<div style="color:#888">暂无日志</div>';
+                    return;
+                }
+
+                container.innerHTML = data.entries.map(e => {
+                    if (e.raw) return '<div style="color:#888;margin-bottom:5px">' + e.raw + '</div>';
+                    const levelColor = e.level === 'ERROR' ? '#f44336' : e.level === 'WARNING' ? '#ff9800' : '#4fc3f7';
+                    return '<div style="margin-bottom:5px">' +
+                        '<span style="color:#888;font-size:10px">' + e.timestamp + '</span> ' +
+                        '<span style="color:' + levelColor + '">[' + e.level + ']</span> ' +
+                        '<span style="color:#aaa;font-size:11px">' + e.message + '</span></div>';
+                }).join('');
+            } catch (e) {
+                container.innerHTML = '<div class="error">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        window.onload = function() {
+            loadOverview();
+        };
+
+        setInterval(function() {
+            if (document.getElementById('tab-overview').classList.contains('active')) {
+                loadOverview();
+            }
+        }, 60000);
+    </script>
+</body>
+</html>

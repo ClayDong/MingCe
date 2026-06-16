@@ -1,0 +1,38 @@
+# 明策 (MingCe) — 全景投资决策系统 全量依赖清单
+# 合并自 market-daily-bot/requirements.txt + MakingMoney/requirements.txt
+# 用于 Docker 构建时一次性安装所有依赖
+# 冻结版本见 requirements-lock.txt
+
+# ─────────────── market-daily-bot 核心依赖 ───────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+pydantic==2.7.0
+pydantic-settings==2.2.0
+aiosqlite==0.20.0
+httpx==0.27.0
+apscheduler==3.10.4
+loguru==0.7.2
+numpy==1.26.4
+akshare==1.18.62
+pytz==2024.1
+
+# ─────────────── MakingMoney 核心依赖 ───────────────
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+flask==3.1.3
+flask-cors==6.0.2
+gunicorn==25.3.0
+tushare==1.4.29
+yfinance==1.4.0
+requests==2.34.2
+pyyaml==6.0.3
+python-dotenv==1.2.2
+openai==2.41.1
+
+# ─────────────── 量化框架 ───────────────
+# pyqlib 从 GitHub 安装，见 Dockerfile
+lightgbm>=4.0
+
+# ─────────────── 杂项工具 ───────────────
+python-dateutil>=2.9

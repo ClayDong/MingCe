@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QLib+VNPY 模拟盘交易平台</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #0a0e27; color: #e0e0e0; }
+        .header { background: linear-gradient(135deg, #1a1f3a 0%, #0d1229 100%);
+                  padding: 20px 30px; border-bottom: 1px solid #2a2f4a; }
+        .header h1 { font-size: 22px; color: #4fc3f7; }
+        .header .subtitle { font-size: 13px; color: #888; margin-top: 4px; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px 30px; }
+        .card { background: #141832; border: 1px solid #2a2f4a; border-radius: 12px;
+                padding: 20px; margin-bottom: 20px; }
+        .card h2 { font-size: 16px; color: #4fc3f7; margin-bottom: 15px; }
+        .input-group { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 15px; align-items: center; }
+        .input-group input, .input-group select {
+            padding: 8px 12px; border: 1px solid #2a2f4a; border-radius: 6px;
+            background: #1a1f3a; color: #e0e0e0; font-size: 14px; }
+        .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+               font-size: 13px; transition: all 0.2s; white-space: nowrap; }
+        .btn-primary { background: #1565c0; color: white; }
+        .btn-primary:hover { background: #1976d2; }
+        .btn-success { background: #2e7d32; color: white; }
+        .btn-success:hover { background: #388e3c; }
+        .btn-danger { background: #c62828; color: white; }
+        .btn-danger:hover { background: #d32f2f; }
+        .btn-info { background: #0277bd; color: white; }
+        .btn-info:hover { background: #0288d1; }
+        .positive { color: #4caf50; }
+        .negative { color: #f44336; }
+        table { width: 100%; border-collapse: collapse; }
+        th { color: #4fc3f7; font-weight: 500; }
+        td, th { padding: 6px 8px; text-align: left; border-bottom: 1px solid #1a1f3a; }
+        .signal-buy { color: #4caf50; }
+        .signal-sell { color: #f44336; }
+        .signal-hold { color: #888; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 QLib+VNPY 模拟盘交易平台</h1>
+        <div class="subtitle">从当前时间节点开始 · 每策略独立10万 · 严格按信号交易 · 数据持久化</div>
+    </div>
+
+    <div class="container">
+
+        <div class="card">
+            <h2>🏦 模拟盘交易（Paper Trading）</h2>
+            <p style="color:#888;font-size:13px;margin-bottom:10px">从今天开始，每个策略独立10万资金，每天按策略信号严格买入/卖出，状态持久化保存</p>
+            <div class="input-group">
+                <input type="text" id="paper-symbol" placeholder="股票代码，如 SZ002594" value="SZ002594">
+                <button class="btn btn-primary" onclick="paperInit()">🆕 初始化（清零重来）</button>
+                <button class="btn btn-success" onclick="paperRunDaily()">📈 执行今日交易</button>
+                <button class="btn btn-info" onclick="paperRefresh()">🔄 刷新状态</button>
+                <button class="btn btn-danger" onclick="paperReset()">🗑️ 清零所有</button>
+            </div>
+            <div id="paper-summary" style="margin-bottom:10px"></div>
+            <div id="paper-results" style="max-height:800px;overflow-y:auto">
+                <div style="color:#888;text-align:center;padding:20px">先点"初始化"创建账户，再点"执行今日交易"运行策略</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔬 策略验证（样本外+参数敏感性）</h2>
+            <p style="color:#888;font-size:13px;margin-bottom:10px">对策略进行样本外验证和参数敏感性分析，评估过拟合风险和策略可靠性，含印花税0.05%</p>
+            <div class="input-group">
+                <input type="text" id="validation-symbol" placeholder="股票代码，如 SZ002594" value="SZ002594">
+                <button class="btn btn-primary" onclick="runValidation()">🔬 运行策略验证</button>
+            </div>
+            <div id="validation-results" style="max-height:600px;overflow-y:auto">
+                <div style="color:#888;text-align:center;padding:20px">点击"运行策略验证"评估所有策略的可靠性</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📋 系统日志</h2>
+            <div class="input-group">
+                <select id="log-level-filter" style="padding:8px;border:1px solid #2a2f4a;border-radius:6px;background:#1a1f3a;color:#e0e0e0">
+                    <option value="">全部</option>
+                    <option value="INFO">INFO</option>
+                    <option value="WARNING">WARNING</option>
+                    <option value="ERROR">ERROR</option>
+                </select>
+                <button class="btn btn-primary" onclick="refreshLogs()">刷新日志</button>
+                <a id="log-export-link" href="/api/logs/export?format=json" class="btn btn-primary" style="text-decoration:none;text-align:center">导出JSON</a>
+                <a href="/api/logs/export?format=txt" class="btn btn-primary" style="text-decoration:none;text-align:center">导出TXT</a>
+            </div>
+            <div id="log-output" style="max-height:300px;overflow-y:auto;background:#0a0e27;border-radius:8px;padding:10px;font-family:monospace;font-size:12px;line-height:1.6">
+                <div style="color:#888">点击"刷新日志"查看系统日志</div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        function formatNumber(n, decimals) {
+            decimals = decimals || 2;
+            if (n === null || n === undefined) return '--';
+            return Number(n).toLocaleString('zh-CN', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
+        }
+
+        function pnlClass(n) {
+            if (n > 0) return 'positive';
+            if (n < 0) return 'negative';
+            return '';
+        }
+
+        function normalizeSymbol(input) {
+            var s = input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+            if (/^\d{6}$/.test(s)) {
+                s = (s.startsWith('6') || s.startsWith('9')) ? 'SH' + s : 'SZ' + s;
+            }
+            return s;
+        }
+
+        async function refreshLogs() {
+            var level = document.getElementById('log-level-filter').value;
+            var output = document.getElementById('log-output');
+            output.innerHTML = '<div style="color:#888">加载中...</div>';
+            try {
+                var filesResp = await fetch('/api/logs/files');
+                var filesData = await filesResp.json();
+                var latestFile = (filesData.files && filesData.files.length > 0) ? filesData.files[0].name : '';
+                if (!latestFile) {
+                    output.innerHTML = '<div style="color:#888">暂无日志文件</div>';
+                    return;
+                }
+                var url = '/api/logs?file=' + encodeURIComponent(latestFile) + '&lines=100' + (level ? '&level=' + level : '');
+                var resp = await fetch(url);
+                var data = await resp.json();
+                if (data.entries.length === 0) {
+                    output.innerHTML = '<div style="color:#888">无匹配日志</div>';
+                    return;
+                }
+                output.innerHTML = data.entries.map(function(e) {
+                    if (e.raw) return '<div style="color:#888">' + e.raw + '</div>';
+                    var levelColor = e.level === 'ERROR' ? '#f44336' : e.level === 'WARNING' ? '#ff9800' : '#4fc3f7';
+                    return '<div><span style="color:#888">' + e.timestamp + '</span> <span style="color:' + levelColor + '">[' + e.level + ']</span> <span style="color:#aaa">' + e.message + '</span></div>';
+                }).join('');
+            } catch (e) {
+                output.innerHTML = '<div style="color:#f44336">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function paperInit() {
+            var symbol = normalizeSymbol(document.getElementById('paper-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+            if (!confirm('确定要初始化 ' + symbol + ' 的所有策略模拟盘？之前的数据将清零！')) return;
+
+            var output = document.getElementById('paper-results');
+            var summary = document.getElementById('paper-summary');
+            output.innerHTML = '<div style="color:#4fc3f7;text-align:center;padding:30px">⏳ 正在初始化 ' + symbol + ' 的模拟盘（29个策略×10万），请稍候...</div>';
+
+            try {
+                var resp = await fetch('/api/paper/init', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol, reset: true})
+                });
+                var data = await resp.json();
+                if (!resp.ok) {
+                    output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ ' + (data.error || '初始化失败') + '</div>';
+                    return;
+                }
+                summary.innerHTML = '<div style="color:#4caf50;text-align:center;padding:10px">✅ 已初始化 ' + data.accounts.length + ' 个策略账户，每个 ¥100,000</div>';
+                paperRefresh();
+            } catch (e) {
+                output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function paperRunDaily() {
+            var symbol = normalizeSymbol(document.getElementById('paper-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+
+            var output = document.getElementById('paper-results');
+            var summary = document.getElementById('paper-summary');
+            output.innerHTML = '<div style="color:#4fc3f7;text-align:center;padding:30px">⏳ 正在执行 ' + symbol + ' 今日策略交易，获取数据并生成信号中...</div>';
+
+            try {
+                var resp = await fetch('/api/paper/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol})
+                });
+                var data = await resp.json();
+                if (!resp.ok) {
+                    output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ ' + (data.error || '执行失败') + '</div>';
+                    return;
+                }
+                renderPaperResults(data);
+            } catch (e) {
+                output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        async function paperRefresh() {
+            var symbol = normalizeSymbol(document.getElementById('paper-symbol').value);
+            var output = document.getElementById('paper-results');
+            var summary = document.getElementById('paper-summary');
+
+            try {
+                var url = symbol ? '/api/paper/status?symbol=' + symbol : '/api/paper/status';
+                var resp = await fetch(url);
+                var data = await resp.json();
+
+                if (!data.accounts || data.accounts.length === 0) {
+                    output.innerHTML = '<div style="color:#888;text-align:center;padding:20px">暂无模拟盘数据，请先初始化</div>';
+                    summary.innerHTML = '';
+                    return;
+                }
+                renderPaperResults({symbol: symbol, summary: data.summary, results: data.accounts.map(function(a) { return {status: 'ok', account: a, strategy_key: a.strategy_key}; })});
+            } catch (e) {
+                output.innerHTML = '<div style="color:#f44336">刷新失败: ' + e.message + '</div>';
+            }
+        }
+
+        async function paperReset() {
+            if (!confirm('确定要清零所有模拟盘数据？此操作不可恢复！')) return;
+
+            try {
+                var resp = await fetch('/api/paper/reset', {method: 'POST'});
+                var data = await resp.json();
+                document.getElementById('paper-results').innerHTML = '<div style="color:#4caf50;text-align:center;padding:20px">✅ ' + data.message + '</div>';
+                document.getElementById('paper-summary').innerHTML = '';
+            } catch (e) {
+                alert('清零失败: ' + e.message);
+            }
+        }
+
+        function renderPaperResults(data) {
+            window._paperData = data;
+            var output = document.getElementById('paper-results');
+            var summaryDiv = document.getElementById('paper-summary');
+            var results = data.results || [];
+            var summary = data.summary || {};
+
+            if (results.length === 0) {
+                output.innerHTML = '<div style="color:#888;text-align:center;padding:20px">无模拟盘数据</div>';
+                return;
+            }
+
+            if (summary.total_strategies) {
+                var pnlColor = summary.total_pnl >= 0 ? '#4caf50' : '#f44336';
+                summaryDiv.innerHTML = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;padding:12px;background:#1a1a2e;border-radius:8px;font-size:13px">' +
+                    '<div><span style="color:#888">策略数</span><br><span style="color:#4fc3f7;font-size:18px;font-weight:bold">' + summary.total_strategies + '</span></div>' +
+                    '<div><span style="color:#888">总投入</span><br><span style="color:#e0e0e0;font-size:18px;font-weight:bold">¥' + (summary.total_initial_capital || 0).toLocaleString() + '</span></div>' +
+                    '<div><span style="color:#888">总市值</span><br><span style="color:#e0e0e0;font-size:18px;font-weight:bold">¥' + (summary.total_current_equity || 0).toLocaleString() + '</span></div>' +
+                    '<div><span style="color:#888">总盈亏</span><br><span style="color:' + pnlColor + ';font-size:18px;font-weight:bold">¥' + (summary.total_pnl || 0).toLocaleString() + '</span></div>' +
+                    '<div><span style="color:#888">盈/亏</span><br><span style="color:#4caf50">' + (summary.profitable_count || 0) + '</span> / <span style="color:#f44336">' + (summary.losing_count || 0) + '</span></div>' +
+                    '<div><span style="color:#888">持仓中</span><br><span style="color:#ff9800;font-size:18px;font-weight:bold">' + (summary.with_position || 0) + '</span></div>' +
+                    '</div>';
+            }
+
+            var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+            html += '<thead><tr style="background:#1a1a2e;color:#4fc3f7">';
+            html += '<th style="padding:6px;text-align:left">策略</th>';
+            html += '<th style="padding:6px;text-align:center">最新信号</th>';
+            html += '<th style="padding:6px;text-align:right">最新价</th>';
+            html += '<th style="padding:6px;text-align:right">现金</th>';
+            html += '<th style="padding:6px;text-align:right">持仓市值</th>';
+            html += '<th style="padding:6px;text-align:right">总资产</th>';
+            html += '<th style="padding:6px;text-align:right">收益率</th>';
+            html += '<th style="padding:6px;text-align:right">浮盈</th>';
+            html += '<th style="padding:6px;text-align:center">持仓</th>';
+            html += '<th style="padding:6px;text-align:center">交易</th>';
+            html += '<th style="padding:6px;text-align:center">详情</th>';
+            html += '</tr></thead><tbody>';
+
+            results.forEach(function(r, idx) {
+                var a = r.account || {};
+                var err = r.error;
+                if (err) {
+                    html += '<tr style="border-bottom:1px solid #333"><td style="padding:5px;color:#f44336" colspan="11">' + r.strategy_key + ': ' + err + '</td></tr>';
+                    return;
+                }
+
+                var retColor = (a.total_pnl_pct || 0) >= 0 ? '#4caf50' : '#f44336';
+                var pnlColor2 = (a.unrealized_pnl || 0) >= 0 ? '#4caf50' : '#f44336';
+                var sigColor = a.last_signal_value === 1 ? '#4caf50' : a.last_signal_value === -1 ? '#f44336' : '#888';
+                var hasPos = (a.position || 0) > 0;
+
+                html += '<tr style="border-bottom:1px solid #222;' + (idx % 2 === 0 ? '' : 'background:#0d0d1a') + '">';
+                html += '<td style="padding:5px;color:#e0e0e0">' + (a.strategy_key || r.strategy_key) + '</td>';
+                html += '<td style="padding:5px;text-align:center;color:' + sigColor + ';font-weight:bold">' + (a.last_signal || '-') + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#e0e0e0">¥' + (a.last_price || 0).toFixed(2) + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#e0e0e0">¥' + (a.cash || 0).toLocaleString() + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#e0e0e0">¥' + (a.position_value || 0).toLocaleString() + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#e0e0e0;font-weight:bold">¥' + (a.total_equity || 0).toLocaleString() + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + retColor + ';font-weight:bold">' + (a.total_pnl_pct || 0).toFixed(2) + '%</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + pnlColor2 + '">' + (hasPos ? (a.unrealized_pnl_pct || 0).toFixed(2) + '%' : '-') + '</td>';
+                html += '<td style="padding:5px;text-align:center">' + (hasPos ? '<span style="color:#4caf50">' + a.position + '股</span>' : '<span style="color:#888">空仓</span>') + '</td>';
+                html += '<td style="padding:5px;text-align:center;color:#e0e0e0">' + (a.trade_count || 0) + '</td>';
+                html += '<td style="padding:5px;text-align:center"><button class="paper-detail-btn" data-key="' + (a.strategy_key || r.strategy_key) + '" style="background:#333;color:#4fc3f7;border:1px solid #4fc3f7;padding:2px 6px;border-radius:4px;cursor:pointer;font-size:11px">详情</button></td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            html += '<div id="paper-detail" style="margin-top:15px"></div>';
+            output.innerHTML = html;
+
+            output.querySelectorAll('.paper-detail-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    showPaperDetail(this.getAttribute('data-key'));
+                });
+            });
+        }
+
+        function showPaperDetail(strategyKey) {
+            var detailDiv = document.getElementById('paper-detail');
+            var results = (window._paperData && window._paperData.results) || [];
+            var found = results.find(function(r) { return (r.account && r.account.strategy_key === strategyKey) || r.strategy_key === strategyKey; });
+            if (!found || !found.account) {
+                detailDiv.innerHTML = '<div style="color:#f44336">未找到策略数据</div>';
+                return;
+            }
+            var a = found.account;
+
+            var html = '<div style="background:#1a1a2e;border-radius:8px;padding:15px">';
+            html += '<h3 style="color:#4fc3f7;margin:0 0 10px 0">' + a.strategy_key + ' 详细信息</h3>';
+            html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:13px;margin-bottom:10px">';
+            html += '<div><span style="color:#888">初始资金:</span> ¥' + (a.initial_capital || 0).toLocaleString() + '</div>';
+            html += '<div><span style="color:#888">当前现金:</span> ¥' + (a.cash || 0).toLocaleString() + '</div>';
+            html += '<div><span style="color:#888">总资产:</span> ¥' + (a.total_equity || 0).toLocaleString() + '</div>';
+            html += '<div><span style="color:#888">总盈亏:</span> <span style="color:' + ((a.total_pnl || 0) >= 0 ? '#4caf50' : '#f44336') + '">¥' + (a.total_pnl || 0).toLocaleString() + '</span></div>';
+            html += '<div><span style="color:#888">创建时间:</span> ' + (a.created_at || '-') + '</div>';
+            html += '<div><span style="color:#888">最后运行:</span> ' + (a.last_run || '未运行') + '</div>';
+            html += '<div><span style="color:#888">最新信号:</span> <span style="color:' + (a.last_signal_value === 1 ? '#4caf50' : a.last_signal_value === -1 ? '#f44336' : '#888') + '">' + (a.last_signal || '-') + '</span></div>';
+            html += '<div><span style="color:#888">交易次数:</span> ' + (a.trade_count || 0) + ' (买' + (a.buy_count || 0) + '/卖' + (a.sell_count || 0) + ')</div>';
+            html += '</div>';
+
+            if ((a.position || 0) > 0) {
+                html += '<div style="background:#0d2818;border:1px solid #4caf50;border-radius:6px;padding:10px;margin-bottom:10px">';
+                html += '<div style="color:#4caf50;font-weight:bold;margin-bottom:5px">📌 当前持仓</div>';
+                html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;font-size:13px">';
+                html += '<div><span style="color:#888">持仓量:</span> ' + a.position + '股</div>';
+                html += '<div><span style="color:#888">成本价:</span> ¥' + (a.avg_cost || 0).toFixed(2) + '</div>';
+                html += '<div><span style="color:#888">现价:</span> ¥' + (a.last_price || 0).toFixed(2) + '</div>';
+                html += '<div><span style="color:#888">市值:</span> ¥' + (a.position_value || 0).toLocaleString() + '</div>';
+                html += '<div><span style="color:#888">浮盈:</span> <span style="color:' + ((a.unrealized_pnl || 0) >= 0 ? '#4caf50' : '#f44336') + '">¥' + (a.unrealized_pnl || 0).toLocaleString() + '</span></div>';
+                html += '<div><span style="color:#888">浮盈%:</span> <span style="color:' + ((a.unrealized_pnl_pct || 0) >= 0 ? '#4caf50' : '#f44336') + '">' + (a.unrealized_pnl_pct || 0).toFixed(2) + '%</span></div>';
+                html += '</div></div>';
+            } else {
+                html += '<div style="background:#1a1a1a;border:1px solid #555;border-radius:6px;padding:10px;margin-bottom:10px;color:#888">当前空仓，等待买入信号</div>';
+            }
+
+            if (a.trades && a.trades.length > 0) {
+                html += '<div style="margin-bottom:10px"><span style="color:#4fc3f7;font-weight:bold">📋 交易记录（从当前时间节点开始）</span></div>';
+                html += '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+                html += '<thead><tr style="color:#888"><th>日期</th><th>时间</th><th>方向</th><th>价格</th><th>数量</th><th>佣金</th><th>印花税</th><th>盈亏</th><th>盈亏%</th></tr></thead><tbody>';
+                a.trades.slice().reverse().forEach(function(t) {
+                    var dirColor = t.direction === 'BUY' ? '#4caf50' : '#f44336';
+                    var pnlColor3 = (t.pnl || 0) >= 0 ? '#4caf50' : '#f44336';
+                    html += '<tr style="border-bottom:1px solid #222">';
+                    html += '<td style="padding:3px;color:#aaa">' + t.date + '</td>';
+                    html += '<td style="padding:3px;color:#aaa">' + (t.time || '-') + '</td>';
+                    html += '<td style="padding:3px;color:' + dirColor + ';font-weight:bold">' + (t.direction === 'BUY' ? '买入' : '卖出') + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:#e0e0e0">¥' + t.price + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:#e0e0e0">' + t.volume + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:#888">¥' + (t.commission || 0).toFixed(2) + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:#888">¥' + (t.stamp_tax || 0).toFixed(2) + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:' + pnlColor3 + '">' + (t.pnl !== undefined ? '¥' + t.pnl : '-') + '</td>';
+                    html += '<td style="padding:3px;text-align:right;color:' + pnlColor3 + '">' + (t.pnl_pct !== undefined ? t.pnl_pct.toFixed(2) + '%' : '-') + '</td>';
+                    html += '</tr>';
+                });
+                html += '</tbody></table>';
+            }
+
+            html += '</div>';
+            detailDiv.innerHTML = html;
+        }
+
+        async function runValidation() {
+            var symbol = normalizeSymbol(document.getElementById('validation-symbol').value);
+            if (!symbol) { alert('请输入股票代码'); return; }
+
+            var output = document.getElementById('validation-results');
+            output.innerHTML = '<div style="color:#4fc3f7;text-align:center;padding:30px">⏳ 正在运行策略验证（样本外+参数敏感性），需要较长时间，请耐心等待...</div>';
+
+            try {
+                var resp = await fetch('/api/validation/run', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: symbol, days: 365})
+                });
+                var data = await resp.json();
+                if (!resp.ok) {
+                    output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ ' + (data.error || '验证失败') + '</div>';
+                    return;
+                }
+                renderValidationResults(data);
+            } catch (e) {
+                output.innerHTML = '<div style="color:#f44336;text-align:center;padding:20px">❌ 网络错误: ' + e.message + '</div>';
+            }
+        }
+
+        function renderValidationResults(data) {
+            var output = document.getElementById('validation-results');
+            var results = data.results || [];
+            if (results.length === 0) {
+                output.innerHTML = '<div style="color:#888;text-align:center;padding:20px">无验证结果</div>';
+                return;
+            }
+
+            var html = '<table style="width:100%;border-collapse:collapse;font-size:12px">';
+            html += '<thead><tr style="background:#1a1a2e;color:#4fc3f7">';
+            html += '<th style="padding:6px;text-align:left">策略</th>';
+            html += '<th style="padding:6px;text-align:center">评级</th>';
+            html += '<th style="padding:6px;text-align:right">得分</th>';
+            html += '<th style="padding:6px;text-align:right">全样本收益</th>';
+            html += '<th style="padding:6px;text-align:right">样本外收益</th>';
+            html += '<th style="padding:6px;text-align:right">收益衰减</th>';
+            html += '<th style="padding:6px;text-align:center">过拟合风险</th>';
+            html += '<th style="padding:6px;text-align:center">参数稳定性</th>';
+            html += '<th style="padding:6px;text-align:right">夏普</th>';
+            html += '<th style="padding:6px;text-align:right">最大回撤</th>';
+            html += '<th style="padding:6px;text-align:center">建议</th>';
+            html += '</tr></thead><tbody>';
+
+            results.forEach(function(r, idx) {
+                if (r.error) {
+                    html += '<tr style="border-bottom:1px solid #333"><td style="padding:5px;color:#f44336" colspan="11">' + r.strategy_key + ': ' + r.error + '</td></tr>';
+                    return;
+                }
+
+                var fm = r.full_backtest || {};
+                var oos = r.out_of_sample || {};
+                var sens = r.sensitivity || {};
+                var grade = r.validation_grade || '?';
+                var gradeColor = grade === 'A' ? '#4caf50' : grade === 'B' ? '#8bc34a' : grade === 'C' ? '#ff9800' : '#f44336';
+                var oofRisk = oos.overfitting_risk || '-';
+                var oofColor = oofRisk === '低' ? '#4caf50' : oofRisk === '中' ? '#ff9800' : '#f44336';
+                var stability = sens.stability || '-';
+                var stabColor = stability === '稳定' ? '#4caf50' : stability === '一般' ? '#ff9800' : '#f44336';
+                var retColor = (fm.total_return || 0) >= 0 ? '#4caf50' : '#f44336';
+                var oosRet = (oos.test_metrics || {}).total_return || 0;
+                var oosRetColor = oosRet >= 0 ? '#4caf50' : '#f44336';
+                var decay = oos.return_decay_pct || 0;
+                var decayColor = decay < 15 ? '#4caf50' : decay < 30 ? '#ff9800' : '#f44336';
+
+                html += '<tr style="border-bottom:1px solid #222;' + (idx % 2 === 0 ? '' : 'background:#0d0d1a') + '">';
+                html += '<td style="padding:5px;color:#e0e0e0">' + (r.strategy || {}).name + '</td>';
+                html += '<td style="padding:5px;text-align:center;color:' + gradeColor + ';font-weight:bold;font-size:16px">' + grade + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + gradeColor + ';font-weight:bold">' + (r.validation_score || 0) + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + retColor + '">' + (fm.total_return || 0).toFixed(2) + '%</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + oosRetColor + '">' + oosRet.toFixed(2) + '%</td>';
+                html += '<td style="padding:5px;text-align:right;color:' + decayColor + '">' + decay.toFixed(1) + '%</td>';
+                html += '<td style="padding:5px;text-align:center;color:' + oofColor + '">' + oofRisk + '</td>';
+                html += '<td style="padding:5px;text-align:center;color:' + stabColor + '">' + stability + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#e0e0e0">' + (fm.sharpe_ratio || 0).toFixed(2) + '</td>';
+                html += '<td style="padding:5px;text-align:right;color:#ff9800">' + (fm.max_drawdown || 0).toFixed(2) + '%</td>';
+                html += '<td style="padding:5px;text-align:center;font-size:11px;color:#bbb">' + (r.recommendation || '-').substring(0, 12) + '</td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            output.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
+"""

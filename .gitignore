@@ -1,0 +1,45 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── 虚拟环境 ──
+venv/
+.venv/
+env/
+
+# ── 环境变量（含 API Key 等敏感信息） ──
+.env
+feishu_config.json
+
+# ── 数据与日志（运行时生成） ──
+data/
+*.db
+*.sqlite
+logs/
+*.log
+
+# ── 操作系统 ──
+.DS_Store
+Thumbs.db
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Git ──
+.git/
+
+# ── 编译缓存 ──
+*.so
+*.dylib
+target/
+.cargo/
+
+# ── 项目临时文件 ──
+fund_monitor_config.json

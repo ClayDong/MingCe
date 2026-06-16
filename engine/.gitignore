@@ -1,0 +1,46 @@
+# ===== 密钥与敏感信息 =====
+feishu_config.json
+.env
+.env.bak
+*.key
+*.pem
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+env/
+
+# ===== 数据目录与日志 =====
+qlib_vnpy_platform/data/cache/
+qlib_vnpy_platform/logs/
+logs/
+*.log
+*.log.*
+
+# ===== 备份文件 =====
+*.bak
+*.bak2
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== QLib =====
+~/.qlib/

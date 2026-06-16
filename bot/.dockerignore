@@ -1,0 +1,53 @@
+# ────────────────────────────────────────────────────────────
+# 明策 (MingCe) Docker 构建排除清单
+# ────────────────────────────────────────────────────────────
+
+# ── Python ──
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── 数据（运行时挂载 volume） ──
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ── 日志（运行时挂载 volume） ──
+logs/
+
+# ── 版本控制 ──
+.git/
+.gitignore
+.gitattributes
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── 环境配置（运行时注入） ──
+.env
+.env.local
+
+# ── 缓存 ──
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 文档（不参与构建） ──
+*.md
+技术文档.md
+产品文档.md
+
+# ── 杂项 ──
+fund_monitor_config.json

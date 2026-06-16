@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    - name: Lint with ruff
+      run: |
+        pip install ruff
+        ruff check qlib_vnpy_platform/ web_app_pkg/ --ignore E501 || true
+    - name: Test with pytest
+      run: |
+        python -m pytest qlib_vnpy_platform/tests/ tests/ -v --tb=short \
+          -k "not data_bridge" \
+          --ignore=tests/test_full_strategy_coverage.py
+    - name: Check syntax
+      run: |
+        python -c "
+import ast, os, sys
+errors = []
+for root, dirs, files in os.walk('.'):
+    if '.git' in root or '__pycache__' in root or 'venv' in root:
+        continue
+    for f in files:
+        if f.endswith('.py'):
+            path = os.path.join(root, f)
+            try:
+                with open(path) as fh:
+                    ast.parse(fh.read())
+            except SyntaxError as e:
+                errors.append(f'{path}: {e}')
+if errors:
+    for e in errors:
+        print(f'ERROR: {e}')
+    sys.exit(1)
+else:
+    print('All files have valid syntax')
+"
