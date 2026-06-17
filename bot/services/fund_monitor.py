@@ -91,23 +91,26 @@ class FundMonitor:
     def fetch_fund_data(self) -> Optional[FundData]:
         """获取基金净值数据"""
         logger.info(f"Fetching fund data for {self.config.fund_code}...")
-        
+
         try:
             # 获取基金历史净值数据
-            df = ak.fund_open_fund_daily_em(symbol=self.config.fund_code)
+            # akshare API 变更：fund_open_fund_daily_em 不再接受 symbol 参数
+            # 改用 fund_open_fund_info_em 获取单只基金净值走势
+            df = ak.fund_open_fund_info_em(symbol=self.config.fund_code, indicator="单位净值走势")
             if df is None or df.empty:
                 logger.warning(f"No data found for fund {self.config.fund_code}")
                 return None
-            
+
             # 按日期降序排序
             df = df.sort_values("净值日期", ascending=False)
-            
+
             # 获取最新数据
             latest = df.iloc[0]
             date = str(latest.get("净值日期", ""))
             net_value = float(latest.get("单位净值", 0))
-            accumulated_value = float(latest.get("累计净值", 0))
-            
+            # fund_open_fund_info_em 不返回累计净值，用单位净值作为回退
+            accumulated_value = net_value
+
             # 计算日涨跌幅
             if len(df) >= 2:
                 prev_net_value = float(df.iloc[1].get("单位净值", 0))
@@ -160,7 +163,7 @@ class FundMonitor:
     
     def calculate_profit(self) -> Optional[float]:
         """计算累计收益率"""
-        if not self.fund_data or not self.config.cost_price:
+        if self.fund_data is None or not self.config.cost_price:
             return None
         
         if self.config.cost_price <= 0:
@@ -171,7 +174,7 @@ class FundMonitor:
     
     def calculate_drawdown(self) -> Optional[float]:
         """计算当前回撤率"""
-        if not self.history_data or self.history_data.empty:
+        if self.history_data is None or self.history_data.empty:
             return None
         
         try:
@@ -189,7 +192,7 @@ class FundMonitor:
     
     def calculate_volatility(self, days: int = 20) -> Optional[float]:
         """计算波动率（标准差）"""
-        if not self.history_data or len(self.history_data) < days:
+        if self.history_data is None or len(self.history_data) < days:
             return None
         
         try:
@@ -211,8 +214,8 @@ class FundMonitor:
     def monitor_daily_change(self) -> List[MonitorAlert]:
         """监控日涨跌幅"""
         alerts = []
-        
-        if not self.fund_data:
+
+        if self.fund_data is None:
             return alerts
         
         daily_change = self.fund_data.daily_change_pct
@@ -425,7 +428,7 @@ class FundMonitor:
         # 获取数据（通过线程池避免阻塞）
         import asyncio
         await asyncio.get_event_loop().run_in_executor(None, self.fetch_fund_data)
-        if not self.fund_data:
+        if self.fund_data is None:
             logger.warning("No fund data available, monitor skipped")
             return {"status": "error", "message": "无法获取基金数据"}
         
