@@ -262,7 +262,7 @@ def _build_market_summary_v2(data: dict) -> str:
     if monetary.get("social_finance_growth"):
         lines.append(f"  社融: {monetary['social_finance_growth']}")
 
-    # ═══ ETF/龙头/北证 ═══
+    # ═══ ETF/大市值涨幅榜/北证 ═══
     etf_high = etf.get("broad_based", [])[:3]
     if etf_high:
         etf_str = [f"{e['name']}{e.get('change_pct', 0):+.2f}%" for e in etf_high]
@@ -271,7 +271,7 @@ def _build_market_summary_v2(data: dict) -> str:
     leading_items = leading.get("headlines", [])[:5]
     if leading_items:
         lead_str = [f"{s['name']}{s.get('change_pct', 0):+.2f}%" for s in leading_items[:3]]
-        lines.append(f"【龙头】{' | '.join(lead_str)}")
+        lines.append(f"【大市值涨幅榜】{' | '.join(lead_str)}")
 
     for idx in bse.get("indices", []):
         p = idx.get("change_pct", 0)

@@ -137,6 +137,50 @@ def _validate_index_value(value: float, name: str) -> bool:
     return abs(float(value)) >= settings.MIN_INDEX_VALUE_THRESHOLD
 
 
+# ── 大宗商品/宏观变量合理性校验范围（2026年基准，避免脏数据推送） ──
+# 范围设计：留足波动空间，但能拦截单位混淆/数量级错误
+_MACRO_PRICE_RANGES = {
+    # 单位：美元/盎司。历史区间 1800-5000，留 20% 缓冲
+    "gold": (1500.0, 6000.0),
+    # 单位：美元/盎司。历史区间 18-60
+    "silver": (10.0, 100.0),
+    # 单位：美元/桶。历史区间 30-120
+    "brent_oil": (20.0, 150.0),
+    # 单位：美元/桶。历史区间 25-115
+    "wti_oil": (15.0, 140.0),
+    # 单位：美元/桶。布伦特应高于WTI，价差 0-10 美元合理
+    # 美元指数：70-115
+    "usd_index": (70.0, 120.0),
+    # VIX：5-80
+    "vix": (5.0, 100.0),
+}
+
+
+def _validate_macro_price(value, attr: str) -> bool:
+    """校验宏观商品价格是否在合理区间内。
+
+    Args:
+        value: 价格值（str/float/int）
+        attr: 属性名（gold/silver/brent_oil/wti_oil/usd_index/vix）
+
+    Returns:
+        True 如果值在合理区间内
+    """
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    if np.isnan(v) or np.isinf(v) or v == 0:
+        return False
+    rng = _MACRO_PRICE_RANGES.get(attr)
+    if rng is None:
+        return True  # 未配置范围的属性默认通过
+    lo, hi = rng
+    return lo <= v <= hi
+
+
 # ── 数据源函数（同步） ─────────────────────────────────────
 
 def _fetch_index_sina():
@@ -867,8 +911,14 @@ def get_etf_data() -> dict:
 @_cached("leading", ttl_seconds=settings.CACHE_TTL_LEADING, module_name="leading")
 @retry(max_retries=2, delay=1.0, backoff=2.0)
 def get_leading_stocks() -> dict:
-    """龙头股票动向。"""
-    logger.info("Fetching leading stocks...")
+    """大市值涨幅榜（按市值≥300亿 + 涨跌幅降序筛选）。
+
+    注意：本字段名为 "leading" 是历史命名，实际语义是
+    "大市值个股当日涨幅榜"，并非行业龙头。行业龙头需要按
+    细分行业市占率/营收排名定义，此处仅按市值+涨幅筛选。
+    面向用户展示时应使用"大市值涨幅榜"而非"龙头股"。
+    """
+    logger.info("Fetching large-cap top gainers (leading stocks)...")
     result = LeadingStockData()
 
     df_stock = _try_sources(_fetch_stock_sina, _fetch_stock_tx, _fetch_stock_em)
@@ -963,27 +1013,63 @@ def get_leading_stocks() -> dict:
 @_cached("global_macro", ttl_seconds=settings.CACHE_TTL_GLOBAL, module_name="global_macro")
 @retry(max_retries=2, delay=1.0, backoff=2.0)
 def get_global_macro() -> dict:
-    """全球宏观变量数据（多源：新浪期货 + akshare 备用）。"""
+    """全球宏观变量数据（多源：新浪期货 + akshare 备用）。
+
+    严谨性保障：
+    1. 所有价格经过 _validate_macro_price 合理性区间校验
+    2. 布伦特原油独立获取（OIL 符号），不再用 WTI 近似
+    3. 布伦特-WTI 价差校验（正常 0-10 美元，异常则标记告警）
+    """
     logger.info("Fetching global macro data...")
     result = GlobalMacroData()
 
-    # 1) 外盘期货：黄金/白银/原油（新浪期货 API，稳定可靠）
+    # 1) 外盘期货：黄金/白银/布伦特/WTI（akshare futures_foreign_hist）
+    #    布伦特原油使用 OIL 符号独立获取，不再用 WTI 近似复制
     futures_map = {
-        "GC": "gold",       # Comex黄金
-        "SI": "silver",     # 白银
-        "CL": "wti_oil",    # WTI原油
+        "GC": "gold",        # COMEX 黄金（美元/盎司）
+        "SI": "silver",      # COMEX 白银（美元/盎司）
+        "OIL": "brent_oil",  # ICE 布伦特原油（美元/桶）
+        "CL": "wti_oil",     # NYMEX WTI 原油（美元/桶）
     }
     for sym, attr in futures_map.items():
         try:
             df = ak.futures_foreign_hist(symbol=sym)
-            if df is not None and not df.empty:
-                price = safe_float(df["close"].iloc[-1])
-                if price is not None and price != 0:
-                    # 黄金取整数，银/油取两位小数
-                    format_str = f"{price:.0f}" if attr == "gold" else f"{price:.2f}"
-                    setattr(result, attr, format_str)
+            if df is None or df.empty:
+                continue
+            price = safe_float(df["close"].iloc[-1])
+            if price is None or price == 0:
+                continue
+            # 合理性区间校验：拦截单位混淆/数量级错误
+            if not _validate_macro_price(price, attr):
+                logger.warning(
+                    f"宏观价格校验失败 {sym}->{attr}: {price} 超出合理区间 "
+                    f"{_MACRO_PRICE_RANGES.get(attr)}，已丢弃"
+                )
+                continue
+            # 黄金取整数，银/油取两位小数
+            format_str = f"{price:.0f}" if attr == "gold" else f"{price:.2f}"
+            setattr(result, attr, format_str)
         except Exception as e:
             logger.debug(f"Futures {sym} failed: {e}")
+
+    # 布伦特-WTI 价差合理性校验（正常布伦特比WTI高0-10美元）
+    # 若价差异常（如完全相等或倒挂），记录告警但不强制覆盖
+    if result.brent_oil and result.wti_oil:
+        try:
+            brent_v = float(result.brent_oil)
+            wti_v = float(result.wti_oil)
+            spread = brent_v - wti_v
+            if abs(spread) < 0.01:
+                logger.warning(
+                    f"布伦特与WTI价格完全一致({brent_v})，疑似数据源异常"
+                )
+            elif spread < -5:
+                logger.warning(
+                    f"布伦特({brent_v})低于WTI({wti_v}) {abs(spread):.2f}美元，"
+                    f"罕见倒挂，请人工核实"
+                )
+        except (ValueError, TypeError):
+            pass
 
     # 2) 美债收益率（akshare 中国外汇交易中心数据）
     try:
@@ -1080,9 +1166,17 @@ def get_global_macro() -> dict:
         except Exception as e2:
             logger.debug(f"USD index fallback failed: {e2}")
 
-    # 布伦特原油（如果没有，用WTI近似）
+    # 布伦特原油回退：仅在独立获取失败时，用 WTI + 3美元 估算（不再直接复制）
+    # 布伦特通常比 WTI 高 1-5 美元，取中值 3 美元作为估算补偿
     if not result.brent_oil and result.wti_oil:
-        result.brent_oil = result.wti_oil
+        try:
+            wti_v = float(result.wti_oil)
+            est_brent = wti_v + 3.0
+            if _validate_macro_price(est_brent, "brent_oil"):
+                result.brent_oil = f"{est_brent:.2f}"
+                logger.info(f"布伦特原油独立获取失败，用WTI+3估算: {result.brent_oil}")
+        except (ValueError, TypeError):
+            pass
 
     # highlights
     if result.gold:
@@ -1341,7 +1435,7 @@ def detect_alerts(market: dict, north: dict, leading: dict, etf: dict | None = N
             direction = "暴涨" if change > 0 else "暴跌"
             alerts.append(AlertItem(
                 alert_type="leading_stock",
-                title=f"龙头{stock['name']}{direction}{abs(change):.2f}%",
+                title=f"大市值{stock['name']}{direction}{abs(change):.2f}%",
                 content=f"市值{stock.get('market_cap', '')}",
                 level="danger" if change < -5 else "warning",
             ).model_dump())

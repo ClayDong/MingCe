@@ -498,7 +498,7 @@ def _build_etf_section_card(etf: dict) -> str:
 
 
 def _build_leading_section_card(leading: dict) -> str:
-    """龙头企业"""
+    """大市值涨幅榜（市值≥300亿 + 当日涨幅降序）"""
     if not leading:
         return ""
     headlines = leading.get("headlines", [])[:5]
@@ -828,15 +828,15 @@ def build_detail_card(data: dict) -> dict | list:
     if mon_text:
         detail_sections.append("## 🏦 货币政策\n" + mon_text)
 
-    # ETF / 龙头 / 北证
+    # ETF / 大市值涨幅榜 / 北证
     etf_text = _build_etf_section_card(etf)
     lead_text = _build_leading_section_card(leading)
     bse_text = _build_bse_section_card(bse)
     extra_parts = []
     if etf_text:
-        extra_parts.append(etf_text)
+        extra_parts.append("**ETF**\n" + etf_text)
     if lead_text:
-        extra_parts.append(lead_text)
+        extra_parts.append("**大市值涨幅榜**\n" + lead_text)
     if bse_text:
         extra_parts.append(bse_text)
     if extra_parts:
