@@ -115,6 +115,11 @@ async def scheduled_report(version: str):
     try:
         data = await generate_daily_report(version)
         await push_daily_report(data)
+
+        # 持仓卖出告警：收盘版额外检查持仓股的卖出信号
+        if version == "close":
+            await _check_holdings_sell_signals()
+
         _task_store[task_id] = {"status": "completed", "version": version}
         await _persist_task(task_id, "completed", "scheduled_report")
         logger.info(f"Scheduled report {version} completed")
@@ -126,6 +131,85 @@ async def scheduled_report(version: str):
             f"📰 日报 [{version}] 生成失败\n```\n{str(e)[:300]}\n```",
             level="error",
         )
+
+
+async def _check_holdings_sell_signals():
+    """检查持仓股的卖出信号，有卖出信号时主动推送告警。
+
+    决策闭环关键：用户加了持仓后，系统主动监控卖出时机。
+    """
+    try:
+        from services.portfolio_manager import get_holdings
+        from services.strategy_adapter import get_adapter
+        from services.feishu_service import send_card_message, get_tenant_token
+
+        holdings = await get_holdings()
+        if not holdings:
+            return
+
+        symbols = [h["symbol"] for h in holdings]
+        logger.info(f"持仓卖出信号检查: {len(symbols)} 只持仓股")
+
+        adapter = get_adapter()
+        signals = await adapter.get_signals_async(symbols)
+        if not signals:
+            return
+
+        # 筛选卖出信号明确的股票（sell_count - buy_count > 2）
+        sell_alerts = []
+        for sym, sig in signals.items():
+            if "error" in sig:
+                continue
+            buy_n = sig.get("buy_count", 0)
+            sell_n = sig.get("sell_count", 0)
+            net = buy_n - sell_n
+            if net < -2:  # 偏空
+                holding = next((h for h in holdings if h["symbol"] == sym), {})
+                cost = holding.get("cost_price", 0)
+                current = sig.get("price", 0)
+                profit_pct = ((current - cost) / cost * 100) if cost and current else 0
+                sell_alerts.append({
+                    "name": sig.get("stock_name", sym),
+                    "symbol": sym,
+                    "price": current,
+                    "profit_pct": profit_pct,
+                    "sell_count": sell_n,
+                    "buy_count": buy_n,
+                    "sell_signals": sig.get("sell_signals", [])[:3],
+                })
+
+        if not sell_alerts:
+            logger.info("持仓卖出信号检查完成: 无卖出信号")
+            return
+
+        # 推送卖出告警卡片
+        if settings.FEISHU_CHAT_ID:
+            await get_tenant_token()
+            lines = ["## ⚠️ 持仓卖出信号告警", ""]
+            for a in sell_alerts:
+                profit_icon = "🟢" if a["profit_pct"] >= 0 else "🔴"
+                lines.append(
+                    f"**{a['name']}** ({a['symbol']})\n"
+                    f"{profit_icon} 现价 {a['price']:.2f} | 盈亏 {a['profit_pct']:+.1f}%\n"
+                    f"🔴 卖出信号 {a['sell_count']} 个 vs 🟢 买入 {a['buy_count']} 个\n"
+                )
+                for s in a["sell_signals"]:
+                    lines.append(f"  - {s.get('strategy_name', '')} 强度 {s.get('signal_strength', 0):.0%}")
+                lines.append("")
+
+            lines.append("---\n⚠️ 以上为策略信号提示，不构成投资建议。请结合基本面和仓位管理决策。")
+
+            card = {
+                "header": {
+                    "title": {"tag": "plain_text", "content": "⚠️ 持仓卖出信号告警"},
+                    "template": "red",
+                },
+                "elements": [{"tag": "markdown", "content": "\n".join(lines)}],
+            }
+            await send_card_message(settings.FEISHU_CHAT_ID, card)
+            logger.info(f"持仓卖出告警已推送: {len(sell_alerts)} 只股票")
+    except Exception as e:
+        logger.error(f"持仓卖出信号检查失败（不影响日报）: {e}")
 
 
 async def scheduled_fund_monitor():

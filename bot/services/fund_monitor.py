@@ -3,9 +3,13 @@
 基于专家对话内容，实现涨跌幅、止盈、回撤和波动率监控。
 """
 
+import asyncio
+from pathlib import Path
+
 import akshare as ak
 import pandas as pd
 import numpy as np
+import aiosqlite
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from loguru import logger
@@ -613,3 +617,176 @@ def build_fund_monitor_card(monitor_result: Dict) -> Dict:
     }
     
     return card
+
+
+class FundMonitorManager:
+    """多基金监控管理器。
+
+    使用 SQLite（复用 portfolio_manager 的 data/portfolio.db）存储多只基金的监控配置，
+    通过 aiosqlite + asyncio.Lock 保证并发安全。每只基金用现有的 FundMonitor 类监控。
+    """
+
+    _DB_PATH = Path(__file__).parent.parent / "data" / "portfolio.db"
+
+    def __init__(self):
+        self._db_conn: Optional[aiosqlite.Connection] = None
+        self._lock = asyncio.Lock()
+
+    async def _get_db(self) -> aiosqlite.Connection:
+        """获取数据库连接（双重检查锁定，确保只创建一次）。"""
+        if self._db_conn is None:
+            async with self._lock:
+                if self._db_conn is None:
+                    Path(self._DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+                    self._db_conn = await aiosqlite.connect(str(self._DB_PATH))
+                    self._db_conn.row_factory = aiosqlite.Row
+                    await self._db_conn.execute("PRAGMA journal_mode=WAL")
+                    await self._db_conn.execute("PRAGMA busy_timeout=5000")
+                    await self._db_conn.execute("PRAGMA synchronous=NORMAL")
+                    await self._init_db()
+        return self._db_conn
+
+    async def _init_db(self):
+        """初始化表结构，并自动迁移现有 _fund_monitor_config（001480）到数据库。"""
+        db = self._db_conn
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS fund_configs (
+                fund_code TEXT PRIMARY KEY,
+                fund_name TEXT NOT NULL,
+                cost_price REAL,
+                total_shares REAL,
+                total_investment REAL,
+                base_investment REAL NOT NULL DEFAULT 1000,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.commit()
+
+        # 自动迁移现有的 _fund_monitor_config（001480）到数据库
+        async with db.execute("SELECT COUNT(*) FROM fund_configs") as cursor:
+            row = await cursor.fetchone()
+            count = row[0] if row else 0
+
+        if count == 0:
+            default_config = FundMonitorConfig()
+            await db.execute(
+                """INSERT OR IGNORE INTO fund_configs
+                   (fund_code, fund_name, cost_price, total_shares, total_investment, base_investment, active)
+                   VALUES (?, ?, ?, ?, ?, ?, 1)""",
+                (
+                    default_config.fund_code,
+                    default_config.fund_name,
+                    default_config.cost_price,
+                    default_config.total_shares,
+                    default_config.total_investment,
+                    default_config.base_investment,
+                ),
+            )
+            await db.commit()
+            logger.info(
+                f"Migrated default fund config to DB: {default_config.fund_code} ({default_config.fund_name})"
+            )
+
+    async def add_fund(
+        self,
+        fund_code: str,
+        fund_name: str,
+        cost_price: Optional[float] = None,
+        total_investment: Optional[float] = None,
+        base_investment: float = 1000,
+    ) -> Dict:
+        """添加基金配置（若已存在则更新）。"""
+        db = await self._get_db()
+        try:
+            await db.execute(
+                """INSERT OR REPLACE INTO fund_configs
+                   (fund_code, fund_name, cost_price, total_shares, total_investment, base_investment, active)
+                   VALUES (?, ?, ?, NULL, ?, ?, 1)""",
+                (fund_code, fund_name, cost_price, total_investment, base_investment),
+            )
+            await db.commit()
+            logger.info(f"Fund added: {fund_name} ({fund_code})")
+            return {"success": True, "fund_code": fund_code, "fund_name": fund_name}
+        except Exception as e:
+            logger.error(f"Failed to add fund {fund_code}: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def remove_fund(self, fund_code: str) -> Dict:
+        """移除基金配置。"""
+        db = await self._get_db()
+        try:
+            await db.execute("DELETE FROM fund_configs WHERE fund_code = ?", (fund_code,))
+            await db.commit()
+            logger.info(f"Fund removed: {fund_code}")
+            return {"success": True, "fund_code": fund_code}
+        except Exception as e:
+            logger.error(f"Failed to remove fund {fund_code}: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def get_all_funds(self) -> List[Dict]:
+        """获取所有活跃基金配置。"""
+        db = await self._get_db()
+        async with db.execute(
+            """SELECT fund_code, fund_name, cost_price, total_shares, total_investment, base_investment, created_at
+               FROM fund_configs WHERE active = 1 ORDER BY created_at"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+    async def run_all_monitors(self) -> Dict:
+        """运行所有活跃基金的监控。
+
+        返回: {"results": [...], "date": "..."}
+        """
+        funds = await self.get_all_funds()
+        if not funds:
+            logger.warning("No active funds to monitor")
+            return {"results": [], "date": datetime.now().strftime("%Y-%m-%d")}
+
+        results = []
+        latest_date = ""
+
+        for fund in funds:
+            base_inv = fund["base_investment"]
+            if base_inv is None:
+                base_inv = 1000.0
+
+            config = FundMonitorConfig(
+                fund_code=fund["fund_code"],
+                fund_name=fund["fund_name"],
+                cost_price=fund["cost_price"],
+                total_shares=fund["total_shares"],
+                total_investment=fund["total_investment"],
+                base_investment=base_inv,
+            )
+            monitor = FundMonitor(config=config)
+            try:
+                result = await monitor.run_monitor()
+                results.append(result)
+                if result.get("status") == "success" and result.get("date"):
+                    latest_date = result["date"]
+            except Exception as e:
+                logger.error(f"Failed to monitor fund {fund['fund_code']}: {e}")
+                results.append({
+                    "status": "error",
+                    "fund_code": fund["fund_code"],
+                    "fund_name": fund["fund_name"],
+                    "message": str(e),
+                })
+
+        return {
+            "results": results,
+            "date": latest_date or datetime.now().strftime("%Y-%m-%d"),
+        }
+
+
+_fund_manager: Optional[FundMonitorManager] = None
+
+
+def get_fund_manager() -> FundMonitorManager:
+    """获取全局 FundMonitorManager 单例。"""
+    global _fund_manager
+    if _fund_manager is None:
+        _fund_manager = FundMonitorManager()
+    return _fund_manager

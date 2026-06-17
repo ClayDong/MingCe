@@ -442,6 +442,17 @@ async def generate_daily_report(version: str = "close") -> dict:
         logger.error(f"Failed to generate five-dimension analysis: {e}")
         data["five_dimension_analysis"] = ""
 
+    # 生成小白模式一句话总结（大白话，便于非专业用户理解）
+    try:
+        from services.llm_service import generate_beginner_summary
+        beginner_summary = await generate_beginner_summary(data)
+        if beginner_summary:
+            data["beginner_summary"] = beginner_summary
+            logger.info(f"Beginner summary generated: {beginner_summary[:50]}")
+    except Exception as e:
+        logger.error(f"Failed to generate beginner summary: {e}")
+        data["beginner_summary"] = ""
+
     # 生成自选股+持仓的策略信号
     try:
         from services.portfolio_manager import get_holdings, get_watchlist
@@ -520,6 +531,16 @@ async def push_daily_report(data: dict) -> bool:
         return False
 
     try:
+        # 预先获取信号胜率统计（async），注入到 data 供同步的 build_detail_card 使用
+        try:
+            from services.signal_tracker import get_signal_tracker
+            tracker = get_signal_tracker()
+            signal_stats = await tracker.get_accuracy_stats(days=30)
+            if signal_stats and signal_stats.get("total_signals", 0) > 0:
+                data["signal_accuracy_stats"] = signal_stats
+        except Exception as _e:
+            logger.debug(f"获取信号胜率统计失败: {_e}")
+
         detail_card = build_detail_card(data)
         ok = await send_card_message(chat_id, detail_card)
 

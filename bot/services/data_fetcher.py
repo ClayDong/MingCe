@@ -2030,6 +2030,135 @@ def get_intraday_comparison() -> dict:
     return result.model_dump()
 
 
+# ── 10. 个股基本面（PE / PB / ROE / 市值 / 行业 / 营收增长） ──
+
+def _to_bare_code(code: str) -> str:
+    """将 A 股代码转换为 akshare 接口需要的纯数字代码。
+
+    支持: SH600519 → 600519, SZ002594 → 002594, BJ920083 → 920083,
+          sh600519 → 600519, 600519 → 600519
+    """
+    code = str(code).strip().upper()
+    if code.startswith(("SH", "SZ", "BJ")):
+        return code[2:]
+    return code
+
+
+@_cached("fundamentals", ttl_seconds=settings.CACHE_TTL_MACRO, module_name="fundamentals")
+@retry(max_retries=2, delay=1.0, backoff=2.0)
+def get_stock_fundamentals(symbols: list[str]) -> dict:
+    """获取股票基本面数据：PE / PB / ROE / 市值 / 行业 / 营收增长。
+
+    数据源：
+      - akshare.stock_a_indicator_lg: PE / PB / 股息率（取最新一期）
+      - akshare.stock_individual_info_em: 总市值 / 流通市值 / 行业
+      - akshare.stock_financial_abstract: ROE（最近一期净资产收益率）/ 营收增长
+
+    单只股票失败不影响其他股票。A 股代码格式自动转换：
+      SH600519 → 600519, SZ002594 → 002594, BJ920083 → 920083
+
+    Args:
+        symbols: 股票代码列表，支持带 SH/SZ/BJ 前缀或纯数字代码
+
+    Returns:
+        {"symbols": {symbol: {pe, pb, roe, market_cap, industry, ...}, ...}, "date": "..."}
+    """
+    logger.info(f"Fetching fundamentals for {len(symbols)} stocks...")
+    from datetime import datetime
+
+    result: dict = {"symbols": {}, "date": datetime.now().strftime("%Y-%m-%d")}
+
+    for symbol in symbols:
+        bare_code = _to_bare_code(symbol)
+        if not bare_code:
+            continue
+        try:
+            entry: dict = {}
+
+            # 1) PE / PB / 股息率（stock_a_indicator_lg，取最新一行）
+            try:
+                df_ind = ak.stock_a_indicator_lg(symbol=bare_code)
+                if df_ind is not None and not df_ind.empty:
+                    latest = df_ind.iloc[-1]
+                    pe = safe_float(latest.get("pe", 0))
+                    pb = safe_float(latest.get("pb", 0))
+                    dividend_yield = safe_float(latest.get("dv_ratio", 0))
+                    if pe:
+                        entry["pe"] = pe
+                    if pb:
+                        entry["pb"] = pb
+                    if dividend_yield:
+                        entry["dividend_yield"] = dividend_yield
+            except Exception as e:
+                logger.debug(f"stock_a_indicator_lg failed for {bare_code}: {e}")
+
+            # 2) 总市值 / 流通市值 / 行业（stock_individual_info_em）
+            try:
+                df_info = ak.stock_individual_info_em(symbol=bare_code)
+                if df_info is not None and not df_info.empty:
+                    # df_info 通常是两列: item / value
+                    item_col = _find_column(df_info, ["item", "项目"])
+                    value_col = _find_column(df_info, ["value", "值"])
+                    if item_col and value_col:
+                        info_map: dict = {}
+                        for _, row in df_info.iterrows():
+                            key = safe_str(row.get(item_col, ""))
+                            val = row.get(value_col, "")
+                            if key:
+                                info_map[key] = val
+                        # 总市值
+                        for k in ("总市值", "总市值（元）"):
+                            if k in info_map:
+                                entry["market_cap"] = safe_float(info_map[k])
+                                break
+                        # 流通市值
+                        for k in ("流通市值", "流通市值（元）"):
+                            if k in info_map:
+                                entry["circulating_market_cap"] = safe_float(info_map[k])
+                                break
+                        # 行业
+                        for k in ("行业", "所属行业"):
+                            if k in info_map:
+                                entry["industry"] = safe_str(info_map[k])
+                                break
+            except Exception as e:
+                logger.debug(f"stock_individual_info_em failed for {bare_code}: {e}")
+
+            # 3) ROE + 营收增长（stock_financial_abstract，取最近一期）
+            try:
+                df_fin = ak.stock_financial_abstract(symbol=bare_code)
+                if df_fin is not None and not df_fin.empty:
+                    for _, row in df_fin.iterrows():
+                        item_key = safe_str(row.iloc[0]) if len(row) > 0 else ""
+                        if not item_key:
+                            continue
+                        # ROE（净资产收益率）
+                        if ("净资产收益率" in item_key or "ROE" in item_key.upper()) and "roe" not in entry:
+                            if len(row) > 1:
+                                roe_val = safe_float(row.iloc[1])
+                                if roe_val:
+                                    entry["roe"] = roe_val
+                        # 营收增长（营业总收入同比增长 / 营业收入同比增长）
+                        if "营业收入" in item_key and "增长" in item_key and "revenue_growth" not in entry:
+                            if len(row) > 1:
+                                rev_growth = safe_float(row.iloc[1])
+                                if rev_growth:
+                                    entry["revenue_growth"] = rev_growth
+                        if "roe" in entry and "revenue_growth" in entry:
+                            break
+            except Exception as e:
+                logger.debug(f"stock_financial_abstract failed for {bare_code}: {e}")
+
+            if entry:
+                result["symbols"][symbol] = entry
+            else:
+                logger.warning(f"No fundamentals data for {symbol} ({bare_code})")
+        except Exception as e:
+            logger.warning(f"Failed to fetch fundamentals for {symbol}: {e}")
+
+    return result
+
+
 # ── 扩展 detect_alerts（新增加密货币/期货告警） ──
 
 def _extend_alerts(alerts: list, crypto: dict | None = None, futures: dict | None = None) -> list:
@@ -2079,5 +2208,6 @@ NEW_DATA_SOURCES = [
     "get_futures_data",
     "get_monetary_data",
     "get_intraday_comparison",
+    "get_stock_fundamentals",
 ]
 

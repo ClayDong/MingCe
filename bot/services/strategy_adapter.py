@@ -402,12 +402,83 @@ class StrategySignalAdapter:
             return {}
 
         if "symbol" in result and "all_signals" in result:
+            # 单只股票：记录信号到生命周期追踪
+            await self._record_signal_lifecycle(result)
             return {result["symbol"]: result}
 
         if "results" in result:
-            return {r["symbol"]: r for r in result["results"] if "error" not in r}
+            out = {}
+            for r in result["results"]:
+                if "error" not in r:
+                    await self._record_signal_lifecycle(r)
+                    out[r["symbol"]] = r
+            return out
 
         return result
+
+    async def _record_signal_lifecycle(self, signal_data: dict) -> None:
+        """将 BUY/SELL 信号记录到 signal_lifecycle 表（决策闭环关键）。
+
+        只在净信号方向明确（|net| > 2）时记录，避免噪声。
+        每只股票每日只记录一次（去重）。
+        """
+        try:
+            symbol = signal_data.get("symbol", "")
+            if not symbol:
+                return
+            buy_n = signal_data.get("buy_count", 0)
+            sell_n = signal_data.get("sell_count", 0)
+            net = buy_n - sell_n
+
+            # 仅在方向明确时记录（|net| > 2）
+            if abs(net) <= 2:
+                return
+
+            direction = "BUY" if net > 0 else "SELL"
+            price = signal_data.get("price", 0)
+            if not price or price <= 0:
+                return
+
+            # 置信度 = 净信号数 / 总信号数
+            total = buy_n + sell_n
+            confidence = abs(net) / total if total > 0 else 0
+
+            # 策略来源：取最强信号的策略名
+            signals_list = (
+                signal_data.get("buy_signals", []) if direction == "BUY"
+                else signal_data.get("sell_signals", [])
+            )
+            strategy_source = "fusion"
+            if signals_list:
+                strongest = max(signals_list, key=lambda s: s.get("signal_strength", 0))
+                strategy_source = strongest.get("strategy_name", "fusion")
+
+            from services.signal_tracker import get_signal_tracker
+            from datetime import date as _date
+            from core.database import get_db
+
+            # 去重：同一天同一股票同一方向只记录一次
+            db = await get_db()
+            today = _date.today().isoformat()
+            existing = await db.fetchone(
+                """SELECT signal_id FROM signal_lifecycle
+                   WHERE symbol = ? AND signal_date = ? AND direction = ?
+                   LIMIT 1""",
+                (symbol, today, direction),
+            )
+            if existing:
+                return
+
+            tracker = get_signal_tracker()
+            await tracker.record_signal(
+                symbol=symbol,
+                direction=direction,
+                confidence=confidence,
+                entry_price=float(price),
+                strategy_source=strategy_source,
+            )
+        except Exception as e:
+            logger.debug(f"记录信号生命周期失败（不影响主流程）: {e}")
 
     async def get_all_signals_async(self) -> dict:
         """异步获取所有自选股的策略信号

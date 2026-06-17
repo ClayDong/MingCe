@@ -585,17 +585,26 @@ def build_strategy_signals_card(signals_data: dict, version: str = "opening") ->
     # ── 逐只股票展示（简洁模式）──
     for sym, data in symbols.items():
         if "error" in data:
-            sections.append(f"**{data.get('stock_name', sym)}** ({sym}) — ❌ {data['error']}")
+            err_name = data.get("stock_name", data.get("name", sym))
+            sections.append(f"**{err_name}** ({sym}) — ❌ {data['error']}")
             continue
 
-        stock_name = data.get("stock_name", sym)
+        # 字段兼容：strategy_adapter 返回 stock_name，decision_engine 返回 name
+        stock_name = data.get("stock_name", data.get("name", sym))
         price = data.get("price", 0)
         change_pct = data.get("change_pct", 0)
         change_icon = "🟢" if change_pct >= 0 else "🔴"
         buy_n = data.get("buy_count", 0)
         sell_n = data.get("sell_count", 0)
 
-        stock_lines = [f"**{stock_name}** ({sym})"]
+        # 多策略共振判断（P1.5）：≥5个买入或卖出策略触发 = 高置信度
+        resonance_tag = ""
+        if buy_n >= 5:
+            resonance_tag = " 🔥**多策略共振看多**"
+        elif sell_n >= 5:
+            resonance_tag = " ❄️**多策略共振看空**"
+
+        stock_lines = [f"**{stock_name}** ({sym}){resonance_tag}"]
         stock_lines.append(f"{change_icon} {price:.2f} ({change_pct:+.2f}%)  🟢买入{buy_n}  🔴卖出{sell_n}")
 
         # 无明确信号：买入=0 且 卖出=0
@@ -603,23 +612,29 @@ def build_strategy_signals_card(signals_data: dict, version: str = "opening") ->
             stock_lines.append("  ⚪ **无明确信号**")
         else:
             # 买入信号详情（简洁：策略名 + 强度条 在同一行）
-            for sig in data.get("buy_signals", [])[:5]:
-                strength = sig.get("signal_strength", 0)
-                bar = "▓" * min(int(strength * 10), 10) + "░" * (10 - min(int(strength * 10), 10))
-                stock_lines.append(f"  🟢 {sig['strategy_name']} {bar} {strength:.0%}")
+            for sig in data.get("buy_signals", data.get("signals", []))[:5]:
+                if isinstance(sig, dict):
+                    strength = sig.get("signal_strength", sig.get("strength", 0))
+                    sname = sig.get("strategy_name", sig.get("name", ""))
+                    bar = "▓" * min(int(strength * 10), 10) + "░" * (10 - min(int(strength * 10), 10))
+                    stock_lines.append(f"  🟢 {sname} {bar} {strength:.0%}")
 
             # 卖出信号详情
             for sig in data.get("sell_signals", [])[:5]:
-                strength = sig.get("signal_strength", 0)
-                bar = "▓" * min(int(strength * 10), 10) + "░" * (10 - min(int(strength * 10), 10))
-                stock_lines.append(f"  🔴 {sig['strategy_name']} {bar} {strength:.0%}")
+                if isinstance(sig, dict):
+                    strength = sig.get("signal_strength", sig.get("strength", 0))
+                    sname = sig.get("strategy_name", sig.get("name", ""))
+                    bar = "▓" * min(int(strength * 10), 10) + "░" * (10 - min(int(strength * 10), 10))
+                    stock_lines.append(f"  🔴 {sname} {bar} {strength:.0%}")
 
-        # 综合判断（基于净信号）
+        # 综合判断（基于净信号）+ 置信度分层
         net = buy_n - sell_n
         if net > 2:
-            stock_lines.append("  ✅ **综合: 偏多**")
+            confidence_label = "高置信" if buy_n >= 5 else "中置信"
+            stock_lines.append(f"  ✅ **综合: 偏多** ({confidence_label})")
         elif net < -2:
-            stock_lines.append("  ⚠️ **综合: 偏空**")
+            confidence_label = "高置信" if sell_n >= 5 else "中置信"
+            stock_lines.append(f"  ⚠️ **综合: 偏空** ({confidence_label})")
         else:
             stock_lines.append("  ➖ **综合: 中性**")
 
@@ -765,7 +780,15 @@ def build_detail_card(data: dict) -> dict | list:
     # ── 摘要区（默认展示） ──
     summary_elements = []
 
-    # 0. 异动提醒（置顶，始终展示）
+    # 0. 小白模式一句话总结（置顶，大白话翻译）
+    beginner_summary = data.get("beginner_summary", "")
+    if beginner_summary:
+        summary_elements.append({
+            "tag": "markdown",
+            "content": f"## 💡 一句话看盘\n{beginner_summary}",
+        })
+
+    # 1. 异动提醒（置顶，始终展示）
     if alerts:
         alert_lines = []
         for a in alerts[:5]:
@@ -776,13 +799,13 @@ def build_detail_card(data: dict) -> dict | list:
             "content": "## 🚨 异动提醒\n" + "\n".join(alert_lines),
         })
 
-    # 1. A 股核心指数（摘要，始终展示）
+    # 2. A 股核心指数（摘要，始终展示）
     summary_elements.append({
         "tag": "markdown",
         "content": _build_index_section(market),
     })
 
-    # 2. 大师兄解读精简版（取前 300 字作为摘要）
+    # 3. 大师兄解读精简版（取前 300 字作为摘要）
     if commentary:
         # 提取核心结论（第一段或前300字）
         commentary_lines = commentary.split("\n")
@@ -852,10 +875,21 @@ def build_detail_card(data: dict) -> dict | list:
     if strategy_signals:
         signal_summaries = []
         for sym, sig_data in strategy_signals.items():
-            sigs = sig_data.get("signals", [])
-            name = sig_data.get("name", sym)
+            # 字段兼容：decision_engine 返回 signals/name，adapter 返回 all_signals/stock_name
+            sigs = sig_data.get("signals", sig_data.get("all_signals", []))
+            name = sig_data.get("name", sig_data.get("stock_name", sym))
             price = sig_data.get("price", 0)
             change_pct = sig_data.get("change_pct", 0)
+
+            # 兼容两种信号格式：decision_engine 的 {signal: ±1} 和 adapter 的 {buy_signals/sell_signals}
+            if not sigs and (sig_data.get("buy_signals") or sig_data.get("sell_signals")):
+                buy_sigs = sig_data.get("buy_signals", [])
+                sell_sigs = sig_data.get("sell_signals", [])
+                sigs = (
+                    [{"name": s.get("strategy_name", ""), "signal": 1, "strength": s.get("signal_strength", 0)} for s in buy_sigs]
+                    + [{"name": s.get("strategy_name", ""), "signal": -1, "strength": s.get("signal_strength", 0)} for s in sell_sigs]
+                )
+
             summary = _build_signal_summary(name, sym, price, change_pct, sigs)
             if summary:
                 buy_count = len([s for s in sigs if s.get("signal", 0) > 0])
@@ -870,6 +904,26 @@ def build_detail_card(data: dict) -> dict | list:
             detail_sections.append("## 🎯 策略信号（自选股 Top 5）\n" + "\n".join(flat_lines))
             if len(signal_summaries) > 5:
                 detail_sections.append(f"> 共 {len(strategy_signals)} 只自选股有信号，展示信号最强 5 只")
+
+    # 信号历史胜率展示（P1.4：决策闭环 — 让用户知道信号准不准）
+    # 数据由 push_daily_report 预先 async 获取后注入 data["signal_accuracy_stats"]
+    stats = data.get("signal_accuracy_stats", {})
+    if stats and stats.get("total_signals", 0) > 0:
+        win_rate = stats.get("win_rate", 0)
+        total = stats.get("total_signals", 0)
+        closed = stats.get("closed_signals", 0)
+        avg_ret = stats.get("avg_return_pct", 0)
+        win_icon = "✅" if win_rate >= 50 else "⚠️"
+        stats_lines = [
+            f"{win_icon} **近30天信号胜率: {win_rate:.1f}%**",
+            f"总信号 {total} 个 | 已结束 {closed} 个 | 平均收益 {avg_ret:+.2f}%",
+        ]
+        by_dir = stats.get("by_direction", {})
+        if by_dir.get("BUY"):
+            stats_lines.append(f"买入信号: 胜率 {by_dir['BUY'].get('win_rate', 0):.1f}% ({by_dir['BUY'].get('hit_target', 0)}/{by_dir['BUY'].get('total', 0)})")
+        if by_dir.get("SELL"):
+            stats_lines.append(f"卖出信号: 胜率 {by_dir['SELL'].get('win_rate', 0):.1f}% ({by_dir['SELL'].get('hit_target', 0)}/{by_dir['SELL'].get('total', 0)})")
+        detail_sections.append("## 📈 信号历史表现\n" + "\n".join(stats_lines))
 
     # 宏观数据
     macro_parts = []

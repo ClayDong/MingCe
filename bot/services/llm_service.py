@@ -799,6 +799,73 @@ async def generate_five_dimension_analysis(data: dict) -> str:
         return ""
 
 
+async def generate_beginner_summary(market_data: dict) -> str:
+    """生成"小白模式"的一句话市场总结。
+
+    用最通俗的语言给出明确操作建议，禁止专业术语。LLM 失败时用规则引擎兜底。
+
+    Args:
+        market_data: 市场数据，包含指数涨跌、北向资金、VIX、BTC涨跌等关键字段
+
+    Returns:
+        一句大白话总结，格式："今日市场[偏多/偏空/震荡]，建议[加仓/减仓/观望]。理由：[1-2个核心原因]"
+    """
+    logger.info("Generating beginner summary...")
+
+    # 提取关键字段（同时用于规则引擎兜底）
+    market = (market_data or {}).get("market", {}) or {}
+    sh_change_pct = market.get("change_pct", 0) or 0  # 上证涨跌幅(%)
+    north = (market_data or {}).get("north_flow", {}) or {}
+    north_flow = north.get("net_flow", 0) or 0  # 北向资金净流(亿)
+
+    def _fallback() -> str:
+        """规则引擎兜底：根据上证涨跌幅和北向资金给出小白总结。"""
+        if sh_change_pct < -1 and north_flow < -30:
+            return "今日市场偏空，建议减仓。理由：大盘破位+外资出逃"
+        if sh_change_pct > 1 and north_flow > 30:
+            return "今日市场偏多，建议加仓。理由：大盘走强+外资进场"
+        return "今日市场震荡，建议观望。理由：方向不明"
+
+    try:
+        gm = (market_data or {}).get("global_macro", {}) or {}
+        vix = gm.get("vix", 0) or 0
+        crypto = (market_data or {}).get("crypto", {}) or {}
+        btc_change = crypto.get("btc_change_pct", 0) or crypto.get("change_pct", 0) or 0
+
+        data_summary = json.dumps({
+            "上证涨跌幅": f"{sh_change_pct}%",
+            "北向资金净流": f"{north_flow}亿",
+            "VIX": vix,
+            "BTC涨跌幅": f"{btc_change}%",
+        }, ensure_ascii=False)
+
+        system_prompt = """你是一位面向股市新手的"小白解说员"。请基于市场数据生成一句话总结。
+
+严格要求：
+1. 用最通俗的大白话，禁止任何专业术语（如"五维矩阵""三层传导""斐波那契""避险资产""风险偏好""北向资金""VIX"等）。
+2. 必须给出明确操作建议：加仓 / 减仓 / 观望（三选一）。
+3. 输出格式严格为："今日市场[偏多/偏空/震荡]，建议[加仓/减仓/观望]。理由：[1-2个核心原因]"
+4. 理由不超过2个，每个不超过15字，用"+"连接。
+5. 总字数控制在50字以内。
+6. 只输出这一句话，不要任何额外内容、标点或解释。
+7. 必须使用中文。"""
+
+        user_prompt = f"市场数据：\n{data_summary}\n\n请生成小白模式的一句话总结。"
+
+        raw = await _call_llm(system_prompt, user_prompt, max_tokens=128)
+        summary = _enforce_rigor(raw).strip()
+
+        # 校验输出格式
+        if summary and "今日市场" in summary and "建议" in summary:
+            return summary
+
+        logger.warning(f"LLM 输出不符合格式，走规则引擎兜底: {summary}")
+    except Exception as e:
+        logger.error(f"LLM 生成小白总结失败，走规则引擎兜底: {e}")
+
+    return _fallback()
+
+
 # ── 启动验证 ──
 
 def warmup() -> bool:
