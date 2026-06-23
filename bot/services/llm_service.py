@@ -57,6 +57,7 @@ _ALT_PATHS = [
     Path(__file__).parent.parent / "SKILL.md",
     Path(__file__).parent.parent / "knowledge" / "SKILL.md",
     Path(__file__).parent.parent / "knowledge" / "master_xiong.md",
+    Path(__file__).parent.parent / "skills" / "wisdom" / "stock-entry-decision" / "SKILL.md",
 ]
 
 # 知识库章节定义（按需加载，避免截断丢失核心框架）
@@ -68,11 +69,12 @@ SKILL_SECTIONS_DEF = {
     "policy": ["国家三层战略", "政策传导", "拉闸限电"],
     "philosophy": ["清净心", "了凡四训", "投资智慧", "反大众共识"],
     "history": ["郑和", "麦哲伦", "朝代", "历史视角"],
+    "wisdom": ["炒股的智慧", "入场决策", "止损", "仓位管理", "止盈", "移动止损", "心理自检", "泡沫参与", "分层下注", "临界点", "三层过滤"],
 }
 
 
 def load_skill_knowledge() -> str:
-    """加载本地 SKILL.md v2.0.0 知识库完整内容。"""
+    """加载本地 SKILL.md v2.0.0 知识库完整内容（支持《炒股的智慧》等知识库）。"""
     paths_to_try = [SKILL_MD_PATH] + _ALT_PATHS
     for p in paths_to_try:
         if p.exists():

@@ -34,9 +34,9 @@ class TestDetectWisdomTriggers:
             "leading_stocks": [],
         }
         triggers = _detect_wisdom_triggers(data)
-        # philosophy_trigger(指数大跌) + cycle_trigger(BDI<500) = 2个不同类别
-        assert triggers.get("philosophy_trigger") is True
-        assert triggers.get("cycle_trigger") is True
+        # psychology_trigger(指数大跌) + risk_warning_trigger(BDI<500) = 2个不同类别
+        assert triggers.get("psychology_trigger") is True
+        assert triggers.get("risk_warning_trigger") is True
         assert len(triggers.get("trigger_reasons", [])) >= 2
 
     def test_single_trigger_not_enough(self):
@@ -64,7 +64,7 @@ class TestDetectWisdomTriggers:
             "leading_stocks": [],
         }
         triggers = _detect_wisdom_triggers(data)
-        # BDI和VIX都属于cycle_trigger，只有1个类别
+        # BDI和VIX都属于risk_warning_trigger，只有1个类别
         assert not triggers.get("trigger_reasons")
 
 

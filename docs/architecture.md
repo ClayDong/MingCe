@@ -15,6 +15,7 @@
 6. [推送层](#6-推送层)
 7. [告警链路](#7-告警链路)
 8. [服务依赖关系图](#8-服务依赖关系图)
+9. [炒股的智慧深度分析](#9-炒股的智慧深度分析)
 
 ---
 
@@ -760,6 +761,7 @@ send_alert(message, level)
                   │  portfolio_manager  │
                   │  feishu_bot_handler │
                   │  fund_monitor       │
+                  │  wisdom_analyzer    │
                   └─────────┬───────────┘
                             │
                     ┌───────▼───────┐
@@ -830,6 +832,16 @@ FastAPI app (main.py)
     │     └── llm_service.generate_commentary()         ← LLM 解读
     │           └── HTTP → SiliconFlow API (Qwen3-8B)
     │
+    ├── wisdom_analyzer.run_wisdom_analysis(data)       ← 深度分析（触发式）
+    │     ├── _detect_wisdom_triggers(data)             ← 触发条件检测
+    │     │     └── ≥2个不同类别触发条件满足 → 继续
+    │     ├── _build_wisdom_data_summary(data)          ← 精简市场数据摘要
+    │     ├── _build_wisdom_prompt(triggers)            ← 动态构建 system prompt
+    │     │     └── _load_wisdom_skills() + _extract_decision_rules()  ← 从 bot/skills/wisdom/ 加载7个SKILL.md
+    │     ├── _call_llm(system_prompt, user_prompt)     ← DeepSeek LLM 分析
+    │     └── _build_wisdom_card(analysis, triggers)    ← 飞书卡片构建
+    │           └── feishu_service.send_card_message()  ← 推送飞书群
+    │
     └── push_daily_report(data)
           └── feishu_service.send_card_message()
                 └── HTTP POST → 飞书 Open API
@@ -841,7 +853,8 @@ scheduled_fund_monitor()
 飞书 @机器人指令
     └── feishu_bot_handler.handle_message()
           ├── portfolio_manager → SQLite 读写
-          └── strategy_adapter.get_signals()
+          ├── strategy_adapter.get_signals()
+          └── "深度分析" → wisdom_analyzer.run_wisdom_analysis()
 ```
 
 ### 8.4 数据流全景
@@ -881,7 +894,146 @@ scheduled_fund_monitor()
                           │  飞书群    │
                           │ 每日推送   │
                           └───────────┘
+
+                    ┌───────────────────────────────────────┐
+                    │         深度分析分支（触发式）           │
+                    │                                       │
+                    │  日报数据（existing_data）              │
+                    │       │                               │
+                    │       ▼                               │
+                    │  _detect_wisdom_triggers(data)         │
+                    │       │                               │
+                    │       ├── 触发条件不足 → 返回 skipped   │
+                    │       │                               │
+                    │       │ 触发条件满足（≥2个不同类别）     │
+                    │       ▼                               │
+                    │  _build_wisdom_data_summary(data)      │
+                    │       │                               │
+                    │       ▼                               │
+                    │  _build_wisdom_prompt(triggers)        │
+                    │    + _load_wisdom_skills() + _extract_decision_rules()      │
+                    │       │                               │
+                    │       ▼                               │
+                    │  _call_llm(system_prompt, user_prompt) │
+                    │    DeepSeek LLM 分析                   │
+                    │       │                               │
+                    │       ▼                               │
+                    │  _build_wisdom_card(analysis, triggers) │
+                    │       │                               │
+                    │       ▼                               │
+                    │  feishu_service.send_card_message()    │
+                    │       │                               │
+                    │       ▼                               │
+                    │  飞书群（深度分析卡片）                  │
+                    └───────────────────────────────────────┘
 ```
+
+---
+
+## 9. 炒股的智慧深度分析
+
+### 9.1 模块概述
+
+- **位置**：`bot/services/wisdom_analyzer.py`
+- **功能**：市场异动时自动触发深度分析
+- **特点**：触发式（非定时），需要至少 2 个不同类别触发条件同时满足
+- **名称说明**："炒股的智慧"是陈江挺著的投资经典书籍名称，模块基于该书的蒸馏知识库（books2skill），包含7个决策SKILL
+- **知识库路径**：`bot/skills/wisdom/`
+### 9.2 触发条件检测
+
+5 类触发条件：
+
+| 类别 | 触发条件 | 阈值/规则 |
+|:-----|:---------|:----------|
+| **1. 市场周期触发** | 金银比 > 85 | 大市判断：宏观失衡信号（书中第二章） |
+| | 北向流出 > 80 亿 | 外资大幅撤离，大市转弱信号 |
+| | 美债 10Y-2Y 倒挂 | 收益率曲线倒挂，经济衰退预警 |
+| | 金油背离 | 黄金与原油走势背离，周期错位 |
+| **2. 入场信号触发** | 大市值个股涨跌幅 ≥ 5% | 临界点突破：权重股剧烈波动（书中第四章） |
+| **3. 风险预警触发** | VIX > 25 | 止损铁律：市场恐慌加剧（书中第五章） |
+| | BDI < 500 | 全球贸易萎缩，基本面恶化 |
+| | M2 增速 < 6% | 流动性收紧，资金面风险 |
+| **4. 心理触发** | A 股指数涨跌幅 ≥ 2% | 六大心理陷阱：市场极端情绪（书中第六章） |
+| | BTC 涨跌幅 ≥ 8% | 加密市场剧烈波动，贪婪与恐惧 |
+| **5. 泡沫触发** | 政策关键词匹配 | 抓住大机会：政策催化信号（书中第七章） |
+
+**激活规则**：至少 2 个不同类别的触发条件同时满足
+
+### 9.3 分析框架
+
+基于陈江挺《炒股的智慧》蒸馏的7个决策SKILL：
+
+| SKILL 名称 | 对应分析维度 | 书中来源 |
+|:-----------|:-------------|:---------|
+| `stock-entry-decision` | 三层过滤入场 | 第二三四章·三层过滤 |
+| `stock-stop-loss-decision` | 止损铁律 | 第五章·止损铁律 |
+| `stock-position-sizing` | 分层下注 | 第三章·分层下注 |
+| `stock-profit-taking-decision` | 让利润奔跑 | 第四章·让利润奔跑 |
+| `stock-trailing-stop` | 移动止损/跟踪止损 | 第四章·让利润奔跑 |
+| `stock-psychology-check` | 六大心理陷阱 | 第三章+第六章·心理建设 |
+| `stock-bubble-participation` | 抓住大机会 | 第七章·抓住大机会 |
+
+**分析框架**：
+
+| 框架维度 | 说明 |
+|:---------|:-----|
+| **大市判断** | 先判大市方向，再决定操作策略（书中第二章） |
+| **临界点四阶段** | 蓄势→突破→加速→衰竭，识别临界点（书中第四章） |
+| **三层过滤入场** | 大市→板块→个股，逐层过滤确认（书中第二三四章） |
+| **止损铁律** | 入场即设止损，亏损不超过本金的一定比例（书中第五章） |
+| **让利润奔跑** | 盈利时耐心持有，用移动止损保护利润（书中第四章） |
+| **分层下注** | 分批建仓，不一把梭哈（书中第三章） |
+| **六大心理陷阱** | 贪婪、恐惧、希望、后悔、从众、锚定（书中第六章） |
+
+**知识库加载**：从 `bot/skills/wisdom/` 加载7个SKILL.md，提取I段（指令）+ E段（示例）+ B段（背景知识）
+
+### 9.4 出处标注系统
+
+| 标注类型 | 格式 | 示例 |
+|:---------|:-----|:-----|
+| **数据出处** | `[数据: 来源]` | `[数据: akshare实时行情]` / `[数据: akshare全球宏观]` / `[数据: 央行官方]` |
+| **框架出处** | `[框架: 《炒股的智慧》章节]` | `[框架: 《炒股的智慧》第二章·大市判断]` / `[框架: 《炒股的智慧》第四章·临界点四阶段]` / `[框架: 《炒股的智慧》第二三四章·三层过滤]` / `[框架: 《炒股的智慧》第五章·止损铁律]` / `[框架: 《炒股的智慧》第四章·让利润奔跑]` / `[框架: 《炒股的智慧》第三章·分层下注]` / `[框架: 《炒股的智慧》第三章+第六章·心理建设]` / `[框架: 《炒股的智慧》第七章·抓住大机会]` |
+| **卡片底部** | 出处说明 + 免责声明 | 每张深度分析卡片均附带 |
+
+### 9.5 数据流
+
+```
+日报数据（existing_data）
+    │
+    ▼
+_detect_wisdom_triggers(data) ── 触发条件不足 ──► 返回 skipped
+    │ 触发条件满足（≥2个不同类别）
+    ▼
+_build_wisdom_data_summary(data) ── 精简市场数据摘要
+    │
+_build_wisdom_prompt(triggers) ── 动态构建 system prompt
+    │ + _load_wisdom_skills() 加载7个SKILL.md
+    │ + _extract_decision_rules() 提取I段+E段+B段
+    ▼
+_call_llm(system_prompt, user_prompt) ── DeepSeek LLM 分析
+    │
+_build_wisdom_card(analysis, triggers) ── 飞书卡片构建
+    │
+    ▼
+feishu_service.send_card_message() ── 推送飞书群
+```
+
+### 9.6 严谨性红线
+
+| 红线 | 说明 |
+|:-----|:-----|
+| **BTC 不是避险资产** | 严禁将 BTC 与黄金并列避险 |
+| **板块轮动归因** | 不得无依据归因政策 |
+| **数据引用** | 所有分析必须引用具体数据 |
+| **禁止倒推** | 严禁"先有结论再找理由" |
+
+### 9.7 API 与交互
+
+| 交互方式 | 说明 |
+|:---------|:-----|
+| **API** | `POST /api/wisdom/analyze`（需 API Key 认证） |
+| **飞书指令** | `@机器人 深度分析` |
+| **平静模式** | 市场平静时推送通知 |
 
 ---
 

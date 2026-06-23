@@ -1,26 +1,91 @@
 """炒股的智慧 · 深度分析模块。
 
-基于 SKILL.md 知识体系（悟而后醒·全领域知识），在市场出现重大异动时
-自动触发深度分析，输出三层传导解读 + 五维交叉验证 + 八大不平衡视角 + 操作建议。
+基于陈江挺《炒股的智慧》蒸馏知识库（7个决策SKILL.md），在市场出现重大异动时
+自动触发深度分析，输出大市阶段判断 + 五维交叉验证 + 操作建议 + 心理提醒。
+
+知识来源：books2skill 蒸馏的《炒股的智慧》7个决策框架
+- stock-entry-decision: 入场决策（三层过滤）
+- stock-stop-loss-decision: 止损决策（止损铁律）
+- stock-position-sizing: 仓位管理（分层下注）
+- stock-profit-taking-decision: 止盈决策（让利润奔跑）
+- stock-trailing-stop: 移动止损技术
+- stock-psychology-check: 交易心理自检（六大心理陷阱）
+- stock-bubble-participation: 泡沫参与决策
 
 触发条件：异动、背离、极端值等信号由 _detect_wisdom_triggers 检测。
 """
 
 import json
 from datetime import datetime
+from pathlib import Path
+
 from loguru import logger
 
 from config.settings import get_settings
 from core.utils import async_retry
 from services.llm_service import (
     _call_llm,
-    _load_sections_by_keywords,
-    _get_skill_sections,
-    SKILL_SECTIONS_DEF,
     _enforce_rigor,
 )
 
 settings = get_settings()
+
+# ── 知识库加载 ──────────────────────────────────────
+
+_WISDOM_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "wisdom"
+
+
+def _load_wisdom_skills() -> dict[str, str]:
+    """加载《炒股的智慧》蒸馏的7个SKILL.md知识库。"""
+    skills = {}
+    if not _WISDOM_SKILLS_DIR.exists():
+        logger.warning(f"炒股的智慧知识库目录不存在: {_WISDOM_SKILLS_DIR}")
+        return skills
+
+    for skill_dir in _WISDOM_SKILLS_DIR.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.exists():
+            try:
+                skills[skill_dir.name] = skill_file.read_text(encoding="utf-8")
+                logger.info(f"加载知识库: {skill_dir.name}")
+            except Exception as e:
+                logger.warning(f"加载知识库失败 {skill_dir.name}: {e}")
+
+    logger.info(f"已加载 {len(skills)} 个《炒股的智慧》知识库")
+    return skills
+
+
+def _extract_decision_rules(content: str) -> str:
+    """从SKILL.md中提取决策相关的核心内容（I段+E段+B段）。
+
+    跳过R段（原文引用）和A1/A2段（历史案例/触发场景），聚焦可操作的规则。
+    每个skill截取最多2000字符，避免prompt过长。
+    """
+    lines = content.split("\n")
+    result_lines = []
+    in_section = False
+
+    for line in lines:
+        if line.startswith("## "):
+            # 只保留I段（方法论骨架）、E段（执行步骤）、B段（边界）
+            if ("I —" in line or "I—" in line or "方法论" in line
+                    or "E —" in line or "E—" in line or "执行步骤" in line
+                    or "B —" in line or "B—" in line or "边界" in line):
+                in_section = True
+                result_lines.append(line)
+            else:
+                in_section = False
+            continue
+
+        if in_section:
+            result_lines.append(line)
+
+        if len("\n".join(result_lines)) > 2000:
+            break
+
+    return "\n".join(result_lines)
 
 
 # ── 触发条件检测 ──────────────────────────────────────
@@ -30,20 +95,20 @@ def _detect_wisdom_triggers(data: dict) -> dict:
 
     Returns:
         {
-            "imbalance_trigger": bool,   # 八大不平衡（重大背离）
-            "valuation_trigger": bool,   # 黑盒子估值（龙头股异动）
-            "cycle_trigger": bool,       # 康波周期（宏观拐点信号）
-            "philosophy_trigger": bool,  # 清净心/反大众共识（情绪极端）
-            "policy_trigger": bool,      # 国家三层战略（明确政策事件）
-            "trigger_reasons": list[str], # 触发原因列表
+            "market_cycle_trigger": bool,   # 临界点四阶段/大市判断（重大背离）
+            "entry_signal_trigger": bool,   # 入场决策（龙头股异动）
+            "risk_warning_trigger": bool,   # 止损铁律/风险信号（宏观拐点信号）
+            "psychology_trigger": bool,     # 交易心理/六大心理陷阱（情绪极端）
+            "bubble_trigger": bool,         # 泡沫参与决策（明确政策事件）
+            "trigger_reasons": list[str],   # 触发原因列表
         }
     """
     triggers = {
-        "imbalance_trigger": False,
-        "valuation_trigger": False,
-        "cycle_trigger": False,
-        "philosophy_trigger": False,
-        "policy_trigger": False,
+        "market_cycle_trigger": False,
+        "entry_signal_trigger": False,
+        "risk_warning_trigger": False,
+        "psychology_trigger": False,
+        "bubble_trigger": False,
         "trigger_reasons": [],
     }
 
@@ -55,57 +120,57 @@ def _detect_wisdom_triggers(data: dict) -> dict:
     leading = data.get("leading", {}) or {}
     alerts = data.get("alerts", []) or []
 
-    # ── 八大不平衡触发条件 ──
-    # 金银比 > 85 预示衰退风险
+    # ── 临界点四阶段/大市判断触发条件 ──
+    # 金银比 > 85 预示衰退风险，大市可能进入临界点
     gold_val = _safe_float(gm.get("gold"))
     silver_val = _safe_float(gm.get("silver"))
     if gold_val and silver_val and silver_val > 0:
         ratio = gold_val / silver_val
         if ratio > 85:
-            triggers["imbalance_trigger"] = True
-            triggers["trigger_reasons"].append(f"金银比{ratio:.1f}>85，预示衰退风险")
+            triggers["market_cycle_trigger"] = True
+            triggers["trigger_reasons"].append(f"金银比{ratio:.1f}>85，大市临界点信号")
 
     # 北向资金大幅流出（>80亿）
     net_flow = _safe_float(north.get("net_flow"))
     if net_flow is not None and net_flow < -80:
-        triggers["imbalance_trigger"] = True
-        triggers["trigger_reasons"].append(f"北向大幅流出{abs(net_flow):.1f}亿")
+        triggers["market_cycle_trigger"] = True
+        triggers["trigger_reasons"].append(f"北向大幅流出{abs(net_flow):.1f}亿，大市转弱")
 
     # 美债10Y-2Y倒挂
     us_10y = _safe_float(gm.get("us_10y_bond"))
     us_2y = _safe_float(gm.get("us_2y_bond"))
     if us_10y and us_2y and us_10y < us_2y:
-        triggers["imbalance_trigger"] = True
-        triggers["trigger_reasons"].append("美债10Y-2Y倒挂，衰退信号")
+        triggers["market_cycle_trigger"] = True
+        triggers["trigger_reasons"].append("美债10Y-2Y倒挂，大市衰退信号")
 
     # 金油背离（黄金涨+原油跌 = 滞胀信号）
     gold_alert = any("黄金" in a.get("title", "") for a in alerts)
     oil_alert = any("原油" in a.get("title", "") or "WTI" in a.get("title", "") for a in alerts)
     if gold_alert and oil_alert:
-        triggers["imbalance_trigger"] = True
-        triggers["trigger_reasons"].append("金油走势背离，关注滞胀风险")
+        triggers["market_cycle_trigger"] = True
+        triggers["trigger_reasons"].append("金油走势背离，大市阶段转换信号")
 
-    # ── 黑盒子估值触发条件 ──
-    # 大市值个股异动（涨幅/跌幅 > 5%）
+    # ── 入场决策触发条件 ──
+    # 大市值个股异动（涨幅/跌幅 > 5%），可能触发三层过滤入场判断
     headlines = leading.get("headlines", []) or []
     for h in headlines[:5]:
         chg = _safe_float(h.get("change_pct"))
         if chg is not None and abs(chg) >= 5:
-            triggers["valuation_trigger"] = True
-            triggers["trigger_reasons"].append(f"大市值异动: {h.get('name', '')} {chg:+.2f}%")
+            triggers["entry_signal_trigger"] = True
+            triggers["trigger_reasons"].append(f"大市值异动: {h.get('name', '')} {chg:+.2f}%，需三层过滤判断入场")
             break
 
-    # ── 康波周期触发条件 ──
+    # ── 止损铁律/风险信号触发条件 ──
     # VIX > 25 或 BDI 大幅波动
     vix = _safe_float(gm.get("vix"))
     if vix and vix > 25:
-        triggers["cycle_trigger"] = True
-        triggers["trigger_reasons"].append(f"VIX={vix:.1f}>25，恐慌升温")
+        triggers["risk_warning_trigger"] = True
+        triggers["trigger_reasons"].append(f"VIX={vix:.1f}>25，止损铁律需警惕")
 
     bdi = _safe_float(gm.get("bdi"))
     if bdi and bdi < 500:
-        triggers["cycle_trigger"] = True
-        triggers["trigger_reasons"].append(f"BDI={bdi:.0f}<500，全球需求极弱")
+        triggers["risk_warning_trigger"] = True
+        triggers["trigger_reasons"].append(f"BDI={bdi:.0f}<500，全球需求极弱，风险升温")
 
     # M2 增速异常（大幅回落或转负）
     m2_growth = monetary.get("m2_growth", "")
@@ -113,50 +178,50 @@ def _detect_wisdom_triggers(data: dict) -> dict:
         try:
             m2_val = float(str(m2_growth).replace("%", ""))
             if m2_val < 6:
-                triggers["cycle_trigger"] = True
-                triggers["trigger_reasons"].append(f"M2增速{m2_val}%偏低，流动性收紧")
+                triggers["risk_warning_trigger"] = True
+                triggers["trigger_reasons"].append(f"M2增速{m2_val}%偏低，流动性收紧需止损防范")
         except (ValueError, TypeError):
             pass
 
-    # ── 清净心/反大众共识触发条件 ──
-    # A股整体暴涨暴跌（涨跌幅 > 2%）
+    # ── 交易心理/六大心理陷阱触发条件 ──
+    # A股整体暴涨暴跌（涨跌幅 > 2%），容易触发心理陷阱
     for idx in market.get("indices", []):
         chg = _safe_float(idx.get("change_pct"))
         if chg is not None and abs(chg) >= 2:
-            triggers["philosophy_trigger"] = True
-            triggers["trigger_reasons"].append(f"{idx.get('name', '')} {chg:+.2f}%，情绪极端")
+            triggers["psychology_trigger"] = True
+            triggers["trigger_reasons"].append(f"{idx.get('name', '')} {chg:+.2f}%，情绪极端需心理自检")
             break
 
-    # BTC 暴涨暴跌（>8%）
+    # BTC 暴涨暴跌（>8%），投机心理陷阱
     btc_chg = _safe_float(crypto.get("btc_change"))
     if btc_chg is not None and abs(btc_chg) >= 8:
-        triggers["philosophy_trigger"] = True
-        triggers["trigger_reasons"].append(f"BTC {btc_chg:+.2f}%，投机情绪极端")
+        triggers["psychology_trigger"] = True
+        triggers["trigger_reasons"].append(f"BTC {btc_chg:+.2f}%，投机情绪极端需心理自检")
 
-    # ── 国家三层战略触发条件 ──
-    # 通过 alerts 检测政策相关事件
+    # ── 泡沫参与决策触发条件 ──
+    # 通过 alerts 检测政策相关事件，可能催生泡沫机会
     policy_keywords = ["政策", "央行", "证监会", "国务院", "降准", "降息", "LPR"]
     for a in alerts:
         title = a.get("title", "")
         if any(kw in title for kw in policy_keywords):
-            triggers["policy_trigger"] = True
-            triggers["trigger_reasons"].append(f"政策事件: {title}")
+            triggers["bubble_trigger"] = True
+            triggers["trigger_reasons"].append(f"政策事件: {title}，需判断泡沫参与时机")
             break
 
     # 至少有2个触发条件才算真正需要深度分析
     active_count = sum([
-        triggers["imbalance_trigger"],
-        triggers["valuation_trigger"],
-        triggers["cycle_trigger"],
-        triggers["philosophy_trigger"],
-        triggers["policy_trigger"],
+        triggers["market_cycle_trigger"],
+        triggers["entry_signal_trigger"],
+        triggers["risk_warning_trigger"],
+        triggers["psychology_trigger"],
+        triggers["bubble_trigger"],
     ])
     if active_count < 2:
-        triggers["imbalance_trigger"] = False
-        triggers["valuation_trigger"] = False
-        triggers["cycle_trigger"] = False
-        triggers["philosophy_trigger"] = False
-        triggers["policy_trigger"] = False
+        triggers["market_cycle_trigger"] = False
+        triggers["entry_signal_trigger"] = False
+        triggers["risk_warning_trigger"] = False
+        triggers["psychology_trigger"] = False
+        triggers["bubble_trigger"] = False
         triggers["trigger_reasons"] = []
 
     return triggers
@@ -178,32 +243,41 @@ def _safe_float(val) -> float | None:
 def _build_wisdom_prompt(market_context: dict) -> str:
     """构建"炒股的智慧"深度分析专用提示词。
 
-    根据触发条件动态加载 SKILL.md 中匹配的章节，
-    要求 LLM 以"悟而后醒"视角做深度分析。
+    根据触发条件动态加载《炒股的智慧》蒸馏知识库中匹配的SKILL.md，
+    要求 LLM 以陈江挺《炒股的智慧》原则做深度分析。
 
     Args:
         market_context: 触发条件 dict（来自 _detect_wisdom_triggers）
     """
-    # 按触发条件动态选择知识库章节
-    sections_to_load = ["core"]  # 始终加载核心框架
+    # 加载知识库
+    all_skills = _load_wisdom_skills()
 
-    if market_context.get("imbalance_trigger"):
-        sections_to_load.append("imbalance")
-    if market_context.get("valuation_trigger"):
-        sections_to_load.append("valuation")
-    if market_context.get("cycle_trigger"):
-        sections_to_load.append("macro")
-    if market_context.get("philosophy_trigger"):
-        sections_to_load.append("philosophy")
-    if market_context.get("policy_trigger"):
-        sections_to_load.append("policy")
+    # 按触发条件动态选择知识库
+    skills_to_load = set()
 
-    # 收集所有关键词
-    all_keywords = []
-    for sec in sections_to_load:
-        all_keywords.extend(SKILL_SECTIONS_DEF.get(sec, []))
+    if market_context.get("market_cycle_trigger"):
+        skills_to_load.add("stock-entry-decision")
+    if market_context.get("entry_signal_trigger"):
+        skills_to_load.add("stock-entry-decision")
+        skills_to_load.add("stock-position-sizing")
+    if market_context.get("risk_warning_trigger"):
+        skills_to_load.add("stock-stop-loss-decision")
+        skills_to_load.add("stock-trailing-stop")
+    if market_context.get("psychology_trigger"):
+        skills_to_load.add("stock-psychology-check")
+    if market_context.get("bubble_trigger"):
+        skills_to_load.add("stock-bubble-participation")
 
-    knowledge_digest = _load_sections_by_keywords(all_keywords)
+    # 提取决策规则
+    knowledge_parts = []
+    for skill_name in sorted(skills_to_load):
+        content = all_skills.get(skill_name, "")
+        if content:
+            rules = _extract_decision_rules(content)
+            if rules.strip():
+                knowledge_parts.append(f"### {skill_name}\n{rules}")
+
+    knowledge_digest = "\n\n".join(knowledge_parts) if knowledge_parts else "（未加载额外知识库）"
 
     _now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -211,21 +285,21 @@ def _build_wisdom_prompt(market_context: dict) -> str:
     reasons = market_context.get("trigger_reasons", [])
     reasons_text = "\n".join(f"- {r}" for r in reasons) if reasons else "- 无特殊触发"
 
-    return f"""你是"悟而后醒"——一位经历多轮牛熊、深谙资本史与人性博弈的资深投资思想家。
+    return f"""你是一位基于《炒股的智慧》（陈江挺著）交易原则的A股市场深度分析师。
 
 ## 今日触发条件
 {reasons_text}
 
-## 核心知识（按触发条件动态加载）
+## 《炒股的智慧》决策知识（按触发条件动态加载）
 
 {knowledge_digest}
 
 ## 分析框架与输出要求
 
-### 一、三层传导解读
-1. **第一层（宏观）**：当前宏观政策/资金面发生了什么？（必须有具体数据支撑）
-2. **第二层（行业）**：如何传导到行业/板块？（传导链路必须可解释，禁止跳跃）
-3. **第三层（个股/操作）**：对具体操作有什么影响？
+### 一、大市与阶段判断
+1. **大市判断**：当前市场处于牛市/熊市/盘整？大市是最高层过滤器 `[框架: 《炒股的智慧》第二章·大市判断]`
+2. **临界点四阶段**：牛皮/正常升势/疯狂/最后，当前处于哪一阶段？ `[框架: 《炒股的智慧》第四章·临界点四阶段]`
+3. **三层过滤入场**：基础分析→阶段判断→临界点，是否满足入场条件？ `[框架: 《炒股的智慧》第二三四章·三层过滤]`
 
 ### 二、五维交叉验证
 - **金**：黄金/白银/金银比 → 避险还是滞胀？
@@ -235,13 +309,17 @@ def _build_wisdom_prompt(market_context: dict) -> str:
 - **G**：VIX/BDI/北向/加密 → 风险偏好与流动性
 - **关键**：五维之间是否出现背离？背离往往意味着拐点
 
-### 三、八大不平衡视角
-（仅在触发时启用）从八大不平衡中选取与当前市场最相关的2-3个维度做深度剖析
-
-### 四、操作建议
-- 基于三层资金管理框架（底仓50%/机动仓30%/现金20%）
+### 三、操作建议
+- **分层下注**：不要一次性满仓，分批建仓 `[框架: 《炒股的智慧》第三章·分层下注]`
+- **止损预设**：入场前必须预设止损点，到点必执行 `[框架: 《炒股的智慧》第五章·止损铁律]`
+- **让利润奔跑**：用移动止损代替固定止盈，让盈利充分发展 `[框架: 《炒股的智慧》第四章·让利润奔跑]`
 - 给出具体仓位调整建议和方向
 - 明确风险提示
+
+### 四、心理提醒
+- 当前市场环境下容易触发的心理陷阱 `[框架: 《炒股的智慧》第三章+第六章·心理建设]`
+- 如：贪婪追高、恐惧割肉、锚定效应、确认偏误等
+- 泡沫阶段需特别提醒 `[框架: 《炒股的智慧》第七章·抓住大机会]`
 
 ## 严谨性红线（必须遵守）
 1. **BTC不是避险资产**，严禁与黄金并列避险，严禁"双重避险""避险组合"等表述
@@ -263,21 +341,21 @@ def _build_wisdom_prompt(market_context: dict) -> str:
    - CPI/PPI/PMI → `[数据: 国家统计局]`
    - 期货品种 → `[数据: 国内期货交易所]`
    - ETF/龙头股 → `[数据: akshare实时]`
-2. **知识框架出处**：使用某个分析框架时必须标注来源，格式：`[框架: 来源]`
-   - 三层传导 → `[框架: 悟而后醒·三层传导元方法论]`
-   - 五维矩阵 → `[框架: 悟而后醒·五维分析框架]`
-   - 八大不平衡 → `[框架: 悟而后醒·八大不平衡]`
-   - 黑盒子估值/斐波那契 → `[框架: 悟而后醒·黑盒子估值]`
-   - 康波周期 → `[框架: 悟而后醒·康波周期]`
-   - 国家三层战略 → `[框架: 悟而后醒·国家三层战略]`
-   - 清净心/反大众共识 → `[框架: 悟而后醒·清净心投资哲学]`
-   - 三层资金管理 → `[框架: 悟而后醒·三层资金管理]`
+2. **知识框架出处**：使用某个分析框架时必须标注来源，格式：`[框架: 《炒股的智慧》第X章·XXX]`
+   - 大市判断 → `[框架: 《炒股的智慧》第二章·大市判断]`
+   - 临界点四阶段 → `[框架: 《炒股的智慧》第四章·临界点四阶段]`
+   - 三层过滤入场 → `[框架: 《炒股的智慧》第二三四章·三层过滤]`
+   - 止损铁律 → `[框架: 《炒股的智慧》第五章·止损铁律]`
+   - 让利润奔跑 → `[框架: 《炒股的智慧》第四章·让利润奔跑]`
+   - 分层下注 → `[框架: 《炒股的智慧》第三章·分层下注]`
+   - 六大心理陷阱 → `[框架: 《炒股的智慧》第三章+第六章·心理建设]`
+   - 泡沫参与 → `[框架: 《炒股的智慧》第七章·抓住大机会]`
 3. **示例**：
-   - "黄金站上3300美元/盎司，金银比升至88 `[数据: akshare全球宏观]`，根据五维矩阵 `[框架: 悟而后醒·五维分析框架]`，金油背离预示滞胀风险"
-   - "深证成指单日跌超3% `[数据: akshare实时行情]`，按照反大众共识原则 `[框架: 悟而后醒·清净心投资哲学]`，恐慌时反而应保持冷静"
+   - "黄金站上3300美元/盎司，金银比升至88 `[数据: akshare全球宏观]`，根据大市判断 `[框架: 《炒股的智慧》第二章·大市判断]`，金油背离预示滞胀风险"
+   - "深证成指单日跌超3% `[数据: akshare实时行情]`，按照六大心理陷阱 `[框架: 《炒股的智慧》第三章+第六章·心理建设]`，恐慌时反而应保持冷静"
 
 ## 输出格式
-1. 使用"悟而后醒"的语言风格：深邃、犀利、直击本质，用通俗语言解释复杂逻辑
+1. 使用《炒股的智慧》的语言风格：务实、直击本质，用通俗语言解释交易逻辑
 2. 控制在 800-1500 字
 3. 必须使用中文，禁止英文（专有缩写如CPI/VIX等除外）
 4. **直接输出分析结果，严禁输出思考过程、推理步骤或"Analyze the Request"之类的内容**
@@ -311,7 +389,7 @@ async def generate_wisdom_analysis(data: dict) -> str:
 
     # 构建专用提示词
     system_prompt = _build_wisdom_prompt(triggers)
-    user_prompt = f"请基于以下当日市场全景数据，用三层传导 + 五维交叉验证进行深度分析：\n\n{market_summary}"
+    user_prompt = f"请基于以下当日市场全景数据，用《炒股的智慧》原则进行深度分析：\n\n{market_summary}"
 
     try:
         raw = await _call_llm(system_prompt, user_prompt, max_tokens=4096)
@@ -476,8 +554,8 @@ def build_wisdom_card(analysis: str, triggers: dict) -> dict:
         "---\n"
         "📌 **分析出处说明**\n"
         "- 数据来源：akshare（A股/全球宏观/期货/加密货币）、央行官方、国家统计局\n"
-        "- 知识框架：悟而后醒（纽约）· 全领域知识体系（三层传导/五维矩阵/八大不平衡/黑盒子估值/康波周期/清净心投资哲学）\n"
-        "- 分析引擎：DeepSeek LLM + SKILL.md 知识库\n"
+        "- 知识框架：陈江挺《炒股的智慧》（books2skill蒸馏·7个决策SKILL）\n"
+        "- 分析引擎：DeepSeek LLM + 《炒股的智慧》知识库\n"
     )
     disclaimer = (
         "⚠️ **风险提示**: 本分析由AI基于知识体系生成，仅供参考，不构成投资建议。"
