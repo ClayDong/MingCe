@@ -195,7 +195,7 @@ class FundMonitor:
         return None
     
     def calculate_volatility(self, days: int = 20) -> Optional[float]:
-        """计算波动率（标准差）"""
+        """计算波动率（标准差）。"""
         if self.history_data is None or len(self.history_data) < days:
             return None
         
@@ -206,6 +206,12 @@ class FundMonitor:
             
             # 计算日收益率
             daily_returns = net_values.pct_change().dropna()
+            
+            # 数据点数量检查
+            min_points = getattr(settings, 'RISK_FUND_VOLATILITY_MIN_POINTS', 20)
+            if len(daily_returns) < min_points:
+                logger.warning(f"波动率数据点不足: {len(daily_returns)} < {min_points}")
+                return 0.0
             
             # 计算波动率（标准差）
             volatility = daily_returns.std() * 100 * np.sqrt(250)  # 年化波动率
@@ -390,7 +396,7 @@ class FundMonitor:
             alerts.append(MonitorAlert(
                 alert_type="volatility",
                 level="danger",
-                title=f"波动率极高：{volatility:.2f}%",
+                title=f"波动率极高：{volatility:.2f}%（衡量基金净值波动幅度，越高意味着短期内涨跌越剧烈）",
                 content="建议暂停定投，观察市场",
                 action="暂停定投",
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -399,7 +405,7 @@ class FundMonitor:
             alerts.append(MonitorAlert(
                 alert_type="volatility",
                 level="warning",
-                title=f"波动率高：{volatility:.2f}%",
+                title=f"波动率高：{volatility:.2f}%（衡量基金净值波动幅度，越高意味着短期内涨跌越剧烈）",
                 content=f"建议增加50%定投金额（{self.config.base_investment * 1.5:.0f}元）",
                 action="加仓",
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -408,7 +414,7 @@ class FundMonitor:
             alerts.append(MonitorAlert(
                 alert_type="volatility",
                 level="info",
-                title=f"波动率中等：{volatility:.2f}%",
+                title=f"波动率中等：{volatility:.2f}%（衡量基金净值波动幅度，越高意味着短期内涨跌越剧烈）",
                 content=f"建议增加20%定投金额（{self.config.base_investment * 1.2:.0f}元）",
                 action="加仓",
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -417,7 +423,7 @@ class FundMonitor:
             alerts.append(MonitorAlert(
                 alert_type="volatility",
                 level="info",
-                title=f"波动率低：{volatility:.2f}%",
+                title=f"波动率低：{volatility:.2f}%（衡量基金净值波动幅度，越高意味着短期内涨跌越剧烈）",
                 content="建议正常定投",
                 action="正常定投",
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -467,6 +473,18 @@ class FundMonitor:
             "alert_count": len(self.alerts),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        
+        # 提示用户配置成本价
+        cost_hints = []
+        if self.config.cost_price is None:
+            cost_hints.append(self.config.fund_name)
+        
+        result["warnings"] = []
+        if cost_hints:
+            hints_text = "、".join(cost_hints[:3])
+            if len(cost_hints) > 3:
+                hints_text += f"等{len(cost_hints)}只基金"
+            result["warnings"].append(f"💡 以下基金未配置成本价（无法计算盈亏）: {hints_text}")
         
         logger.info(f"Monitor completed: {len(self.alerts)} alerts generated")
         return result
@@ -524,8 +542,10 @@ def build_fund_monitor_card(monitor_result: Dict) -> Dict:
     if period_lines:
         sections.append("### 📅 周期表现\n" + "\n".join(period_lines))
     
-    # 持仓收益（如果有）
-    if profit_pct is not None:
+    # 持仓收益（如果有），未配置成本价时提示
+    if profit_pct is None:
+        sections.append("💡 **未配置成本价**：请使用基金管理功能设置成本价以查看盈亏")
+    elif profit_pct >= 0:
         if profit_pct >= 0:
             profit_icon = "💰"
             profit_color = "盈利"

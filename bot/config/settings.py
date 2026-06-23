@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.siliconflow.cn/v1"
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "Qwen/Qwen3-8B"
+    DEEPSEEK_API_KEY: str = ""  # 旧版兼容，优先使用 LLM_API_KEY
+
+    # ── API 认证 ──
+    API_KEY: str = ""  # HTTP API 访问密钥，为空则不启用认证
+
+    # ── 风控规则 ──
+    RISK_SINGLE_STOCK_MAX_PCT: float = 30.0   # 单股持仓上限%
+    RISK_DAILY_LOSS_WARNING_PCT: float = 3.0   # 日亏损预警%
+    RISK_DAILY_LOSS_CIRCUIT_PCT: float = 5.0   # 日亏损熔断%
+    RISK_FUND_VOLATILITY_MIN_POINTS: int = 20  # 波动率计算最少数据点数
 
     # ── 数据存储 ──
     SQLITE_DB_PATH: str = "./data/market_daily.db"
@@ -70,6 +80,9 @@ class Settings(BaseSettings):
 
     # ── 时区 ──
     TZ: str = "Asia/Shanghai"
+
+    # ── 日志 ──
+    LOG_DIR: str = "logs"
 
     # ── 数据源开关 ──
     ENABLE_US_MARKET: bool = True

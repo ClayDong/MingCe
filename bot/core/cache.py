@@ -5,6 +5,7 @@
 支持不同模块使用不同的TTL。
 """
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -32,9 +33,9 @@ class FileCache:
         self.ttl_seconds = ttl_seconds if ttl_seconds is not None else 3600
 
     def _cache_path(self, key: str) -> Path:
-        safe_key = key.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        safe_hash = hashlib.md5(key.encode("utf-8"), usedforsecurity=False).hexdigest()
         today = date.today().isoformat()
-        return self.cache_dir / f"{safe_key}_{today}.json"
+        return self.cache_dir / f"{safe_hash[:12]}_{today}.json"
 
     def get(self, key: str, ttl_seconds: Optional[int] = None) -> Any:
         """获取缓存值，过期或不存在返回 None。

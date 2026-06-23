@@ -1477,12 +1477,12 @@ def detect_alerts(market: dict, north: dict, leading: dict, etf: dict | None = N
 @retry(max_retries=1, delay=1.0, backoff=2.0)
 def get_us_market() -> dict:
     """美股市场数据：道指 / 标普 / 纳指 + 热门个股。"""
+    if not settings.ENABLE_US_MARKET:
+        from models.schemas import USMarketData
+        return USMarketData().model_dump()
     from models.schemas import USMarketData, USStockData
     logger.info("Fetching US market data...")
     result = USMarketData()
-
-    if not settings.ENABLE_US_MARKET:
-        return result.model_dump()
 
     # 美股指数 - 使用快速日线 API（最后一条是最新数据）
     try:
@@ -1597,13 +1597,13 @@ def get_us_market() -> dict:
 @retry(max_retries=1, delay=1.0, backoff=2.0)
 def get_crypto_data() -> dict:
     """加密货币数据：BTC / ETH 实时行情（多源回退）。"""
+    if not settings.ENABLE_CRYPTO:
+        from models.schemas import CryptoData
+        return CryptoData().model_dump()
     from models.schemas import CryptoData
     logger.info("Fetching crypto data...")
     result = CryptoData()
     fetched = False
-
-    if not settings.ENABLE_CRYPTO:
-        return result.model_dump()
 
     # 源1: akshare crypto_js_spot（首选）
     try:
@@ -1664,12 +1664,12 @@ def get_crypto_data() -> dict:
 @retry(max_retries=1, delay=1.0, backoff=2.0)
 def get_futures_data() -> dict:
     """国内商品期货：铁矿石 / 螺纹钢 / 碳酸锂 / 生猪 / 铜等关键品种。"""
+    if not settings.ENABLE_FUTURES:
+        from models.schemas import FuturesData
+        return FuturesData().model_dump()
     from models.schemas import FuturesData
     logger.info("Fetching domestic futures data...")
     result = FuturesData()
-
-    if not settings.ENABLE_FUTURES:
-        return result.model_dump()
 
     # 关注的关键品种
     # 可配置：通过 settings.TARGET_FUTURES 覆盖
@@ -1736,12 +1736,12 @@ def get_futures_data() -> dict:
 @retry(max_retries=1, delay=1.0, backoff=2.0)
 def get_monetary_data() -> dict:
     """货币政策量化数据：M2增速 / 社融增速 / 信贷脉冲 / 存准率 / MLF。"""
+    if not settings.ENABLE_MONETARY:
+        from models.schemas import MonetaryData
+        return MonetaryData().model_dump()
     from models.schemas import MonetaryData
     logger.info("Fetching monetary policy data...")
     result = MonetaryData()
-
-    if not settings.ENABLE_MONETARY:
-        return result.model_dump()
 
     # M2 同比增速（取自 macro_china_money_supply，已有 M2 增速列）
     # M2 同比增速

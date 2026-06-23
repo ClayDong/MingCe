@@ -22,23 +22,17 @@ from services.portfolio_manager import (
 
 
 def _run_async(coro):
-    """在同步上下文中运行 async 协程。
-
-    飞书事件回调是同步的，但 portfolio_manager 已改为 async def。
-    此函数通过获取运行中的事件循环或创建新循环来执行协程。
-    """
+    """运行异步协程，自动适配同步/异步上下文。"""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        # 已在异步上下文中，使用线程池 + asyncio.run 避免死锁
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=30)
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    if loop.is_running():
-        # 已在事件循环中 — 使用 run_coroutine_threadsafe
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
-        return future.result(timeout=30)
-    else:
-        return loop.run_until_complete(coro)
+        # 无运行中的循环，直接运行
+        return asyncio.run(coro)
 
 
 # ── 懒加载导入（异步） ──
@@ -100,6 +94,7 @@ def handle_command(text: str) -> str:
         "remove_holding": lambda: _handle_remove_holding(args),
         "portfolio_summary": _handle_portfolio_summary,
         "stock_signals": lambda: _handle_stock_signals(args),
+        "wisdom_analysis": lambda: _handle_wisdom_analysis(args),
     }
 
     handler = handlers.get(action)
@@ -117,7 +112,8 @@ def handle_command(text: str) -> str:
         "📊 **分析**\n"
         "`我的组合` — 查看持仓概览+信号\n"
         "`信号 比亚迪` — 查看单只股票技术信号\n"
-        "`分析 比亚迪` — 综合宏观+技术分析"
+        "`分析 比亚迪` — 综合宏观+技术分析\n"
+        "`深度分析` — 炒股的智慧深度分析（基于市场数据触发）"
     )
 
 
@@ -128,6 +124,11 @@ def _handle_add_watchlist(args: str) -> str:
     if not args:
         return "请指定股票名称，如 `关注 比亚迪`"
     symbol, name = resolve_symbol(args)
+
+    # 校验股票代码格式
+    if not re.match(r'^(SH|SZ|BJ)\d{6}$', symbol):
+        return f"❌ 无效的股票代码: {symbol}，格式应为 SH/SZ/BJ + 6位数字"
+
     result = _add_watchlist(symbol, name)
     if result["success"]:
         watchlist = _get_watchlist()
@@ -159,6 +160,13 @@ def _handle_add_holding(args: str) -> str:
     price = float(m.group(3))
 
     symbol, name = resolve_symbol(name_raw)
+
+    # 校验股票代码格式
+    if not re.match(r'^(SH|SZ|BJ)\d{6}$', symbol):
+        return f"❌ 无效的股票代码: {symbol}，格式应为 SH/SZ/BJ + 6位数字"
+    if shares <= 0 or price <= 0:
+        return f"❌ 数量({shares})和成本价({price})必须大于0"
+
     result = _add_holding(symbol, name, shares, price)
     if result["success"]:
         total_cost = shares * price
@@ -319,3 +327,42 @@ def _handle_stock_signals(args: str) -> str:
             text_parts.append(f"\n💡 **建议部分止盈** — 已有30%以上收益")
 
     return "\n".join(text_parts)
+
+
+def _handle_wisdom_analysis(args: str) -> str:
+    """触发炒股的智慧深度分析。"""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            from services.wisdom_analyzer import run_wisdom_analysis
+            result = loop.run_until_complete(run_wisdom_analysis())
+            return result
+        finally:
+            loop.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_run)
+        result = future.result(timeout=120)
+
+    if not result:
+        return "❌ 深度分析执行失败"
+
+    if result.get("status") == "skipped":
+        return "🧠 今日市场平稳，未触发深度分析条件。\n> 市场无重大异动，保持耐心即可。"
+
+    analysis = result.get("analysis", "")
+    triggers = result.get("triggers", {})
+    trigger_reasons = triggers.get("trigger_reasons", [])
+
+    text_parts = ["## 🧠 炒股的智慧 · 深度分析\n"]
+    if trigger_reasons:
+        text_parts.append("> 触发: " + " | ".join(trigger_reasons[:3]) + "\n\n")
+    text_parts.append(analysis[:2000])
+    if len(analysis) > 2000:
+        text_parts.append("\n\n...（完整分析已推送到群聊）")
+
+    return "".join(text_parts)

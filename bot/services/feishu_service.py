@@ -942,6 +942,16 @@ def build_detail_card(data: dict) -> dict | list:
     if dim_analysis and dim_analysis not in commentary:
         detail_sections.append("## 🔍 五维深度分析\n" + dim_analysis)
 
+    # 炒股的智慧深度分析
+    wisdom_analysis = data.get("wisdom_analysis", "")
+    wisdom_triggers = data.get("wisdom_triggers", {})
+    if wisdom_analysis:
+        trigger_reasons = wisdom_triggers.get("trigger_reasons", [])
+        trigger_header = ""
+        if trigger_reasons:
+            trigger_header = "> 触发条件: " + " | ".join(trigger_reasons[:3]) + "\n\n"
+        detail_sections.append("## 🧠 炒股的智慧 · 深度分析\n" + trigger_header + wisdom_analysis)
+
     # 清理详情区文本
     detail_content = "\n\n".join(detail_sections)
     detail_content = detail_content.replace("None", "暂无数据")

@@ -7,6 +7,7 @@
 """
 
 import re
+import asyncio
 import httpx
 import json
 from pathlib import Path
@@ -345,8 +346,11 @@ _FALLBACK_KNOWLEDGE = """
 
 def _get_llm_client() -> httpx.AsyncClient:
     global _llm_client
-    if _llm_client is None:
-        _llm_client = httpx.AsyncClient(timeout=60.0)
+    if _llm_client is None or _llm_client.is_closed:
+        _llm_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=10.0),
+            limits=httpx.Limits(max_connections=5),
+        )
     return _llm_client
 
 
@@ -427,6 +431,13 @@ async def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 8192
         headers=headers,
         json=payload,
     )
+    if resp.status_code == 429:
+        retry_after = int(resp.headers.get("Retry-After", "5"))
+        logger.warning(f"LLM API rate limited, waiting {retry_after}s")
+        await asyncio.sleep(retry_after)
+        raise Exception(f"Rate limited: {retry_after}s")
+    if resp.status_code >= 400:
+        raise Exception(f"LLM API error: {resp.status_code} {resp.text[:200]}")
     data = resp.json()
     if "choices" not in data or len(data["choices"]) == 0:
         logger.error(f"LLM response unexpected: {data}")
@@ -540,33 +551,51 @@ async def _call_llm_json(system_prompt: str, user_prompt: str,
     }
 
     # 部分模型支持 response_format
-    if "deepseek" in settings.LLM_MODEL.lower() or "gpt-4" in settings.LLM_MODEL.lower():
+    use_response_format = "deepseek" in settings.LLM_MODEL.lower() or "gpt-4" in settings.LLM_MODEL.lower()
+    if use_response_format:
         payload["response_format"] = {"type": "json_object"}
 
     client = _get_llm_client()
-    try:
+
+    async def _do_call(current_payload: dict) -> Optional[dict]:
         resp = await client.post(
             f"{settings.LLM_BASE_URL}/chat/completions",
             headers=headers,
-            json=payload,
+            json=current_payload,
         )
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "5"))
+            logger.warning(f"LLM JSON API rate limited, waiting {retry_after}s")
+            await asyncio.sleep(retry_after)
+            raise Exception(f"Rate limited: {retry_after}s")
+        if resp.status_code >= 400:
+            raise Exception(f"LLM JSON API error: {resp.status_code} {resp.text[:200]}")
         data = resp.json()
         if "choices" not in data or len(data["choices"]) == 0:
             logger.error(f"LLM JSON response unexpected: {data}")
             return None
-
         msg = data["choices"][0].get("message", {})
         content = msg.get("content", "")
-
         result = _extract_json_from_response(content)
         if result:
             logger.debug(f"✓ LLM JSON 解析成功，字段: {list(result.keys())}")
             return result
-
         logger.warning(f"LLM JSON 解析失败，原始内容前200字: {content[:200]}")
         return None
 
+    try:
+        # 先尝试带 response_format 调用
+        return await _do_call(payload)
     except Exception as e:
+        # 如果是 400 错误且使用了 response_format，去掉后重试
+        if use_response_format and "400" in str(e):
+            logger.warning(f"response_format 导致 400 错误，去掉后重试: {e}")
+            payload.pop("response_format", None)
+            try:
+                return await _do_call(payload)
+            except Exception as e2:
+                logger.error(f"LLM JSON 重试也失败: {e2}")
+                return None
         logger.error(f"LLM JSON 调用失败: {e}")
         return None
 

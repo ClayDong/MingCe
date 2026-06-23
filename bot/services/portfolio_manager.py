@@ -206,6 +206,7 @@ def parse_feishu_command(text: str) -> dict:
         "组合": "portfolio_summary",
         "我的组合": "portfolio_summary",
         "信号": "stock_signals",
+        "深度分析": "wisdom_analysis",
         "分析": "stock_signals",
     }
     

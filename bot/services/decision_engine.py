@@ -65,8 +65,13 @@ def fetch_stock_data(symbol: str, days: int = 365) -> pd.DataFrame:
     sina_symbol = _symbol_to_sina(symbol)
 
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    from config.settings import get_settings
+    if not get_settings().DEBUG:
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+    else:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
 
     df = pd.DataFrame()
 
@@ -396,8 +401,12 @@ def analyze_stock(symbol: str, name: str = "", macro_data: dict = None) -> dict:
     
     # 风险判断
     atr_pct = float(latest.get("atr_pct", 0))
-    # 波动率风险
-    vol_risk = "高" if atr_pct > 4 else ("中" if atr_pct > 2.5 else "低")
+    # 波动率风险（阈值从 settings 读取）
+    from config.settings import get_settings
+    _s = get_settings()
+    vol_high = getattr(_s, "RISK_DAILY_LOSS_WARNING_PCT", 3.0)
+    vol_mid = vol_high * 0.625  # 比例换算
+    vol_risk = "高" if atr_pct > vol_high else ("中" if atr_pct > vol_mid else "低")
     
     return {
         "symbol": symbol,

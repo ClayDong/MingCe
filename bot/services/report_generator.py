@@ -12,6 +12,8 @@
 
 import asyncio
 import json
+import zlib
+import base64
 from datetime import date, datetime, timedelta
 from loguru import logger
 
@@ -204,9 +206,11 @@ def _build_market_summary_v2(data: dict) -> str:
     # ═══ A 股核心 ═══
     lines.append("【A股核心】 " + _DATA_CONFIDENCE["market"])
     for idx in market.get("indices", []):
-        v = idx.get("value", 0)
-        p = idx.get("change_pct", 0)
-        lines.append(f"  {idx['name']}: {v:.2f} ({p:+.2f}%)")
+        val = idx.get("value")
+        chg = idx.get("change_pct")
+        val_str = f"{val:.2f}" if val is not None else "暂无"
+        chg_str = f"{chg:+.2f}%" if chg is not None else "暂无"
+        lines.append(f"  {idx['name']}: {val_str} ({chg_str})")
     up = market.get("up_count", 0)
     down = market.get("down_count", 0)
     vol = market.get("total_volume", "")
@@ -237,8 +241,11 @@ def _build_market_summary_v2(data: dict) -> str:
     if us_indices:
         lines.append("【美股】")
         for idx in us_indices:
-            p = idx.get("change_pct", 0)
-            lines.append(f"  {idx['name']}: {idx.get('value', 0):.2f} ({p:+.2f}%)")
+            us_val = idx.get("value")
+            us_chg = idx.get("change_pct")
+            us_val_str = f"{us_val:.2f}" if us_val is not None else "暂无"
+            us_chg_str = f"{us_chg:+.2f}%" if us_chg is not None else "暂无"
+            lines.append(f"  {idx['name']}: {us_val_str} ({us_chg_str})")
         us_stocks = us_market.get("top_stocks", [])
         if us_stocks:
             hot = [f"{s['name']}{s['change_pct']:+.2f}%" for s in us_stocks[:5]]
@@ -286,6 +293,9 @@ async def _save_report_to_db(report_date: str, version: str, data: dict):
     try:
         db = await get_db()
         content = json.dumps(data, ensure_ascii=False, default=str)
+        # 压缩内容（如果超过1KB）
+        if isinstance(content, str) and len(content) > 1024:
+            content = "ZLIB:" + base64.b64encode(zlib.compress(content.encode("utf-8"))).decode("ascii")
         modules = json.dumps(list(data.keys()), ensure_ascii=False)
         await db.execute(
             """INSERT OR REPLACE INTO daily_reports
@@ -354,8 +364,7 @@ async def generate_daily_report(version: str = "close") -> dict:
 
     # 构建五维摘要并生成 LLM 解读
     market_summary = _build_market_summary_v2(data)
-    # 清理 None/NoneType 等英文残留
-    market_summary = market_summary.replace("None", "暂无")
+    # 清理英文残留（仅处理非数据字段中的英文值）
     market_summary = market_summary.replace("close", "收盘")
     market_summary = market_summary.replace("False", "否")
     market_summary = market_summary.replace("True", "是")
@@ -398,10 +407,12 @@ async def generate_daily_report(version: str = "close") -> dict:
         if indices:
             idx_lines = []
             for idx in indices:
-                v = idx.get("value", 0)
-                p = idx.get("change_pct", 0)
-                icon = "🟢" if p >= 0 else "🔴"
-                idx_lines.append(f"{icon}{idx['name']}: {v:.2f} ({p:+.2f}%)")
+                v = idx.get("value")
+                p = idx.get("change_pct")
+                icon = "🟢" if (p or 0) >= 0 else "🔴"
+                v_str = f"{v:.2f}" if v is not None else "暂无"
+                p_str = f"{p:+.2f}%" if p is not None else "暂无"
+                idx_lines.append(f"{icon}{idx['name']}: {v_str} ({p_str})")
             fallback_parts.append("\n".join(idx_lines))
 
         north_net = north.get("net_flow")
@@ -432,12 +443,17 @@ async def generate_daily_report(version: str = "close") -> dict:
 
         commentary = "\n\n".join(fallback_parts) if fallback_parts else "📊 数据获取中，请稍后查看。"
         logger.info("LLM commentary unavailable, used template fallback")
+    # 清理 commentary 中可能残留的 None 值
+    if commentary:
+        commentary = commentary.replace("None", "暂无").replace("True", "是").replace("False", "否")
     data["master_commentary"] = commentary
 
     # 顺便生成五维专项解读
     try:
         dim_analysis = await generate_five_dimension_analysis(data)
         data["five_dimension_analysis"] = dim_analysis
+        if data["five_dimension_analysis"]:
+            data["five_dimension_analysis"] = data["five_dimension_analysis"].replace("None", "暂无").replace("True", "是").replace("False", "否")
     except Exception as e:
         logger.error(f"Failed to generate five-dimension analysis: {e}")
         data["five_dimension_analysis"] = ""
@@ -452,6 +468,19 @@ async def generate_daily_report(version: str = "close") -> dict:
     except Exception as e:
         logger.error(f"Failed to generate beginner summary: {e}")
         data["beginner_summary"] = ""
+
+    # 炒股的智慧深度分析（触发条件满足时才生成）
+    try:
+        from services.wisdom_analyzer import generate_wisdom_analysis, _detect_wisdom_triggers
+        triggers = _detect_wisdom_triggers(data)
+        if triggers.get("triggered"):
+            wisdom_analysis = await generate_wisdom_analysis(data)
+            if wisdom_analysis:
+                data["wisdom_analysis"] = wisdom_analysis
+                data["wisdom_triggers"] = triggers
+                logger.info(f"Wisdom analysis generated (triggers: {triggers.get('trigger_count', 0)})")
+    except Exception as e:
+        logger.error(f"Failed to generate wisdom analysis: {e}")
 
     # 生成自选股+持仓的策略信号
     try:

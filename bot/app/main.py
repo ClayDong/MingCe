@@ -6,6 +6,8 @@
 """
 
 import json
+import zlib
+import base64
 import uuid
 import time
 from pathlib import Path
@@ -38,8 +40,17 @@ if _fund_monitor_cache_path.exists():
     except Exception:
         pass
 
+import asyncio
 _task_store: dict[str, dict] = {}
+_task_lock = asyncio.Lock()
 _MAX_TASKS = 100
+
+
+def _set_task(task_id: str, value: dict):
+    _task_store[task_id] = value
+
+def _get_task(task_id: str) -> dict | None:
+    return _task_store.get(task_id)
 
 
 def _prune_task_store():
@@ -297,12 +308,25 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
 
+    # 每日凌晨3点清理过期缓存
+    async def scheduled_cache_cleanup():
+        from core.cache import FileCache
+        cache = FileCache()
+        cleaned = cache.clean_expired(max_age_hours=48)
+        logger.info(f"定时缓存清理: 清理了 {cleaned} 个过期文件")
+
+    scheduler.add_job(
+        scheduled_cache_cleanup, "cron", hour=3, minute=0,
+        id="cache_cleanup", misfire_grace_time=300,
+        replace_existing=True,
+    )
+
     scheduler.start()
     logger.info("Scheduler started: 08:00(early) / 09:10(morning) / 11:35(noon) / 15:10(close) / 15:35(fund_monitor) / 16:00(signal_eval) / 五维框架 v2.0")
 
     yield
 
-    scheduler.shutdown(wait=False)
+    scheduler.shutdown(wait=True)
     await db.close()
     await close_client()
     logger.info("Shutdown complete")
@@ -324,6 +348,27 @@ async def log_requests(request: Request, call_next):
     duration = time.time() - start
     logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
     return response
+
+
+# 需要认证的写操作端点列表
+_WRITE_ENDPOINTS = {
+    "/api/report/generate", "/api/cache/clear", "/api/cache/clean",
+    "/api/send_message", "/api/fund-monitor/run", "/api/fund-monitor/config",
+    "/api/data-quality/reset-monitor", "/api/wisdom/analyze",
+    "/api/strategy-signals/push",
+}
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    """API Key 认证中间件 — 仅保护写操作端点。"""
+    if settings.API_KEY and request.url.path in _WRITE_ENDPOINTS:
+        auth = request.headers.get("Authorization", "")
+        api_key = request.query_params.get("api_key", "")
+        token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else api_key
+        if token != settings.API_KEY:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "无效的 API Key"})
+    return await call_next(request)
 
 
 @app.get("/")
@@ -365,6 +410,20 @@ async def health():
     # 检查 LLM 服务
     llm_ok = bool(settings.LLM_API_KEY and settings.LLM_BASE_URL and settings.LLM_MODEL)
 
+    # 检查飞书服务
+    feishu_ok = bool(settings.FEISHU_APP_ID and settings.FEISHU_APP_SECRET and settings.FEISHU_CHAT_ID)
+    
+    # 外部依赖探测（轻量级）
+    llm_reachable = None
+    try:
+        if llm_ok:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{settings.LLM_BASE_URL.rstrip('/')}/models", headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"})
+                llm_reachable = r.status_code == 200
+    except Exception:
+        llm_reachable = False
+
     # 检查缓存
     from core.cache import FileCache
     cache = FileCache()
@@ -378,7 +437,7 @@ async def health():
         if stats.get("consecutive_failures", 0) >= 2
     ]
 
-    all_ok = db_ok and llm_ok and cache_ok
+    all_ok = db_ok and llm_ok and cache_ok and feishu_ok
     status = "ok" if all_ok else "degraded"
     if not db_ok:
         status = "critical"
@@ -394,6 +453,10 @@ async def health():
             "llm": {
                 "status": "configured" if llm_ok else "unconfigured",
                 "model": settings.LLM_MODEL or "N/A",
+                "reachable": llm_reachable,
+            },
+            "feishu": {
+                "status": "configured" if feishu_ok else "unconfigured",
             },
             "cache": {
                 "status": "ok" if cache_ok else "error",
@@ -777,7 +840,7 @@ async def get_latest_report(version: str = Query(None, description="morning/noon
             "found": True, "report_date": row["report_date"],
             "version": row["version"], "status": row["status"],
             "created_at": row["created_at"],
-            "content": json.loads(row["content"]),
+            "content": json.loads(zlib.decompress(base64.b64decode(row["content"][5:])).decode("utf-8") if isinstance(row["content"], str) and row["content"].startswith("ZLIB:") else row["content"]),
         }
     return {"found": False, "message": "今日尚无已生成的日报"}
 
@@ -972,6 +1035,61 @@ async def update_fund_monitor_cost(
         logger.error(f"Failed to save fund monitor config: {e}")
         return {"success": False, "message": f"保存失败: {e}"}
 
+# ── 炒股的智慧深度分析 API ──────────────────────────────
+
+@app.post("/api/wisdom/analyze")
+async def run_wisdom_analysis_api(background_tasks: BackgroundTasks):
+    """手动触发「炒股的智慧」深度分析。"""
+    task_id = str(uuid.uuid4())[:8]
+    _task_store[task_id] = {"status": "pending", "type": "wisdom_analysis"}
+    _prune_task_store()
+    background_tasks.add_task(_run_wisdom_analysis_task, task_id)
+    return {"status": "accepted", "task_id": task_id, "message": "深度分析任务已提交"}
+
+
+async def _run_wisdom_analysis_task(task_id: str):
+    """执行炒股的智慧深度分析任务。"""
+    try:
+        _task_store[task_id]["status"] = "running"
+        await _persist_task(task_id, "running", "wisdom_analysis")
+        from services.wisdom_analyzer import run_wisdom_analysis, build_wisdom_card
+        result = await run_wisdom_analysis()
+
+        if result.get("status") == "skipped":
+            _task_store[task_id] = {"status": "completed", "type": "wisdom_analysis",
+                                    "result": "skipped", "reason": "市场平静，无需深度分析"}
+            await _persist_task(task_id, "completed", "wisdom_analysis", result="skipped")
+            # 跳过时也通知用户
+            if settings.FEISHU_CHAT_ID:
+                from services.feishu_service import send_card_message, get_tenant_token
+                await get_tenant_token()
+                skip_card = {
+                    "header": {"template": "blue", "title": {"tag": "plain_text", "content": "🧠 炒股的智慧 · 平静模式"}},
+                    "elements": [{"tag": "markdown", "content": "今日市场平稳，未触发深度分析条件。\n> 市场无重大异动，保持耐心即可。"}],
+                }
+                await send_card_message(settings.FEISHU_CHAT_ID, skip_card)
+            return
+
+        analysis = result.get("analysis", "")
+        triggers = result.get("triggers", {})
+
+        # 推送飞书卡片
+        if settings.FEISHU_CHAT_ID and analysis:
+            from services.feishu_service import send_card_message, get_tenant_token
+            await get_tenant_token()
+            card = build_wisdom_card(analysis, triggers)
+            await send_card_message(settings.FEISHU_CHAT_ID, card)
+
+        _task_store[task_id] = {"status": "completed", "type": "wisdom_analysis",
+                                "triggers": triggers}
+        await _persist_task(task_id, "completed", "wisdom_analysis", result="success")
+        logger.info("Wisdom analysis completed and pushed")
+    except Exception as e:
+        _task_store[task_id] = {"status": "failed", "type": "wisdom_analysis", "error": str(e)}
+        await _persist_task(task_id, "failed", "wisdom_analysis", error=str(e))
+        logger.error(f"Wisdom analysis failed: {e}", exc_info=True)
+
+
 # ── 应用启动时的 loguru 日志轮转配置 ──
 
 import sys as _sys
@@ -986,7 +1104,7 @@ if not _loguru_configured:
         level="INFO",
     )
     logger.add(
-        "logs/mingce_{time:YYYYMMDD}.log",
+        settings.LOG_DIR + "/mingce_{time:YYYYMMDD}.log",
         rotation="10 MB",
         retention="30 days",
         compression="gz",
