@@ -734,6 +734,36 @@ def get_north_flow() -> dict:
             monitor.record_failure(source_name, str(e))
             logger.debug(f"North flow source {source_name} failed: {e}")
 
+    # 最终回退：东方财富 kamt 接口
+    if not result.net_flow:
+        try:
+            import httpx as _httpx_kamt
+            resp = _httpx_kamt.get(
+                "https://push2his.eastmoney.com/api/qt/kamt.kline/get?fields1=f1,f3&fields2=f51,f52,f53,f54,f55,f56&klt=101&lmt=1",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                kamt_data = data.get("data", {})
+                sh_str = kamt_data.get("hk2sh", [""])[0] if kamt_data.get("hk2sh") else ""
+                sz_str = kamt_data.get("hk2sz", [""])[0] if kamt_data.get("hk2sz") else ""
+                if sh_str or sz_str:
+                    # 格式: "2026-06-24,0.00,5200000.00,273757367.45"
+                    sh_parts = sh_str.split(",") if sh_str else []
+                    sz_parts = sz_str.split(",") if sz_str else []
+                    # 第4个字段是净买入额（元），转亿元
+                    sh_net = safe_float(sh_parts[3]) / 1e8 if len(sh_parts) > 3 else 0
+                    sz_net = safe_float(sz_parts[3]) / 1e8 if len(sz_parts) > 3 else 0
+                    total_net = round(sh_net + sz_net, 2)
+                    if total_net != 0:
+                        result.net_flow = total_net
+                        result.sh_flow = round(sh_net, 2)
+                        result.sz_flow = round(sz_net, 2)
+                        logger.info(f"North flow fallback (eastmoney kamt): net={total_net}, sh={sh_net}, sz={sz_net}")
+        except Exception as e:
+            logger.debug(f"North flow eastmoney kamt fallback failed: {e}")
+
     # 生成数据质量报告
     report = generate_quality_report("north_flow", result.model_dump(), all_issues)
     _data_quality_reports["north_flow"] = report
@@ -1075,15 +1105,13 @@ def get_global_macro() -> dict:
     try:
         df = ak.bond_zh_us_rate()
         if df is not None and not df.empty:
-            for _, row in df.iterrows():
-                name = safe_str(row.get("名称", ""))
-                price = safe_float(row.get("最新价", row.get("price", 0)))
-                if price is not None and price != 0:
-                    if "美国" in name:
-                        if "10年" in name and not result.us_10y_bond:
-                            result.us_10y_bond = f"{price:.2f}"
-                        elif "2年" in name and not result.us_2y_bond:
-                            result.us_2y_bond = f"{price:.2f}"
+            last = df.iloc[-1]
+            us_10y = safe_float(last.get("美国国债收益率10年"))
+            us_2y = safe_float(last.get("美国国债收益率2年"))
+            if us_10y and not result.us_10y_bond:
+                result.us_10y_bond = f"{us_10y:.2f}"
+            if us_2y and not result.us_2y_bond:
+                result.us_2y_bond = f"{us_2y:.2f}"
     except Exception as e:
         logger.debug(f"Bond rate fetch failed: {e}")
 
@@ -1109,6 +1137,26 @@ def get_global_macro() -> dict:
         except Exception as e:
             logger.debug(f"Forex {sym} failed: {e}")
 
+    # 3b) 汇率回退：新浪外汇 hq.sinajs.cn
+    if not result.usd_cny:
+        try:
+            resp = _requests.get(
+                "https://hq.sinajs.cn/list=fx_susdcny",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+                timeout=10,
+            )
+            text = resp.text.strip()
+            val = text.split('"')[1] if '"' in text else ""
+            if val:
+                parts = val.split(",")
+                if len(parts) > 1:
+                    price = safe_float(parts[1])
+                    if price and 6.0 < price < 8.0:
+                        result.usd_cny = f"{price:.4f}"
+                        logger.info(f"USD/CNY fallback (sina forex): {result.usd_cny}")
+        except Exception as e:
+            logger.debug(f"USD/CNY sina forex fallback failed: {e}")
+
     # 4) VIX 恐慌指数（新浪期货）
     try:
         url = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20_x=/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=VIX"
@@ -1122,6 +1170,26 @@ def get_global_macro() -> dict:
                     result.vix = f"{price:.2f}"
     except Exception as e:
         logger.debug(f"VIX fetch failed: {e}")
+
+    # 4b) VIX 回退：新浪期货 hf_VX
+    if not result.vix:
+        try:
+            resp = _requests.get(
+                "https://hq.sinajs.cn/list=hf_VX",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+                timeout=10,
+            )
+            text = resp.text.strip()
+            val = text.split('"')[1] if '"' in text else ""
+            if val:
+                parts = val.split(",")
+                if len(parts) > 0:
+                    price = safe_float(parts[0])
+                    if price and 10 < price < 80:
+                        result.vix = f"{price:.2f}"
+                        logger.info(f"VIX fallback (sina hf_VX): {result.vix}")
+        except Exception as e:
+            logger.debug(f"VIX sina hf_VX fallback failed: {e}")
 
     # 5) BDI 波罗的海干散货指数
     try:
@@ -1165,6 +1233,26 @@ def get_global_macro() -> dict:
                             logger.info(f"USD index fallback: {result.usd_index}")
         except Exception as e2:
             logger.debug(f"USD index fallback failed: {e2}")
+
+    # 6c) 美元指数回退方案3：新浪期货 hf_DINI
+    if not result.usd_index:
+        try:
+            resp = _requests.get(
+                "https://hq.sinajs.cn/list=hf_DINI",
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"},
+                timeout=10,
+            )
+            text = resp.text.strip()
+            val = text.split('"')[1] if '"' in text else ""
+            if val:
+                parts = val.split(",")
+                if len(parts) > 0:
+                    price = safe_float(parts[0])
+                    if price and 90 < price < 120:
+                        result.usd_index = f"{price:.4f}"
+                        logger.info(f"USD index fallback3 (sina hf_DINI): {result.usd_index}")
+        except Exception as e:
+            logger.debug(f"USD index hf_DINI fallback failed: {e}")
 
     # 布伦特原油回退：仅在独立获取失败时，用 WTI + 3美元 估算（不再直接复制）
     # 布伦特通常比 WTI 高 1-5 美元，取中值 3 美元作为估算补偿
@@ -1643,6 +1731,51 @@ def get_crypto_data() -> dict:
                     result.eth_change = eth.get("usd_24h_change")
         except Exception as e:
             logger.debug(f"Failed to fetch CoinGecko crypto fallback: {e}")
+
+    # ETH 回退：Binance API
+    if not result.eth_price:
+        try:
+            import httpx as _httpx_binance
+            resp = _httpx_binance.get(
+                "https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                price = safe_float(data.get("lastPrice"))
+                chg = safe_float(data.get("priceChangePercent"))
+                if price:
+                    result.eth_price = f"{price:,.0f}"
+                    if chg is not None:
+                        result.eth_change = chg
+                    fetched = True
+                    logger.info(f"ETH fallback (Binance): {result.eth_price} ({result.eth_change}%)")
+        except Exception as e:
+            logger.debug(f"ETH Binance fallback failed: {e}")
+
+    # ETH 回退2：Gate.io API
+    if not result.eth_price:
+        try:
+            import httpx as _httpx_gate
+            resp = _httpx_gate.get(
+                "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=ETH_USDT",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and len(data) > 0:
+                    price = safe_float(data[0].get("last"))
+                    chg = safe_float(data[0].get("change_percentage"))
+                    if price:
+                        result.eth_price = f"{price:,.0f}"
+                        if chg is not None:
+                            result.eth_change = round(chg, 2)
+                        fetched = True
+                        logger.info(f"ETH fallback (Gate.io): {result.eth_price} ({result.eth_change}%)")
+        except Exception as e:
+            logger.debug(f"ETH Gate.io fallback failed: {e}")
 
     if result.btc_change is not None:
         direction = "上涨" if result.btc_change >= 0 else "下跌"
