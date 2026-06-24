@@ -45,6 +45,9 @@ _task_store: dict[str, dict] = {}
 _task_lock = asyncio.Lock()
 _MAX_TASKS = 100
 
+# LLM 健康探测缓存（60秒内不重复探测）
+_llm_reachable_cache = {"ok": None, "last_check": 0}
+
 
 def _set_task(task_id: str, value: dict):
     _task_store[task_id] = value
@@ -413,16 +416,24 @@ async def health():
     # 检查飞书服务
     feishu_ok = bool(settings.FEISHU_APP_ID and settings.FEISHU_APP_SECRET and settings.FEISHU_CHAT_ID)
     
-    # 外部依赖探测（轻量级）
+    # 外部依赖探测（带60秒缓存）
     llm_reachable = None
-    try:
-        if llm_ok:
-            import httpx
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{settings.LLM_BASE_URL.rstrip('/')}/models", headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"})
-                llm_reachable = r.status_code == 200
-    except Exception:
-        llm_reachable = False
+    _now = time.time()
+    if llm_ok:
+        if _llm_reachable_cache["ok"] is not None and (_now - _llm_reachable_cache["last_check"]) < 60:
+            llm_reachable = _llm_reachable_cache["ok"]
+        else:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    r = await client.get(f"{settings.LLM_BASE_URL.rstrip('/')}/models", headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"})
+                    llm_reachable = r.status_code == 200
+                    _llm_reachable_cache["ok"] = llm_reachable
+                    _llm_reachable_cache["last_check"] = _now
+            except Exception:
+                llm_reachable = False
+                _llm_reachable_cache["ok"] = False
+                _llm_reachable_cache["last_check"] = _now
 
     # 检查缓存
     from core.cache import FileCache

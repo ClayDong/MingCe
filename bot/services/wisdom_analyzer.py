@@ -34,12 +34,19 @@ settings = get_settings()
 
 _WISDOM_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "wisdom"
 
+_wisdom_skills_cache: dict[str, str] | None = None
+
 
 def _load_wisdom_skills() -> dict[str, str]:
-    """加载《炒股的智慧》蒸馏的7个SKILL.md知识库。"""
+    """加载《炒股的智慧》蒸馏的7个SKILL.md知识库（带缓存）。"""
+    global _wisdom_skills_cache
+    if _wisdom_skills_cache is not None:
+        return _wisdom_skills_cache
+
     skills = {}
     if not _WISDOM_SKILLS_DIR.exists():
         logger.warning(f"炒股的智慧知识库目录不存在: {_WISDOM_SKILLS_DIR}")
+        _wisdom_skills_cache = skills
         return skills
 
     for skill_dir in _WISDOM_SKILLS_DIR.iterdir():
@@ -53,7 +60,8 @@ def _load_wisdom_skills() -> dict[str, str]:
             except Exception as e:
                 logger.warning(f"加载知识库失败 {skill_dir.name}: {e}")
 
-    logger.info(f"已加载 {len(skills)} 个《炒股的智慧》知识库")
+    logger.info(f"已加载 {len(skills)} 个《炒股的智慧》知识库（已缓存）")
+    _wisdom_skills_cache = skills
     return skills
 
 

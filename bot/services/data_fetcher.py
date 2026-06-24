@@ -7,8 +7,11 @@
 import akshare as ak
 import pandas as pd
 import numpy as np
+import urllib3
 from loguru import logger
 from typing import Optional, Any, Dict, List
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from core.utils import safe_float, safe_str, safe_pct, format_volume, retry
 from core.cache import FileCache, get_cache_for_module
@@ -1223,7 +1226,7 @@ def get_global_macro() -> dict:
             resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, verify=False)
             text = resp.text
             if text and "([{" in text:
-                match = re.search(r"\(\[(.*?)\]\)", text, re.DOTALL)
+                match = _re.search(r"\(\[(.*?)\]\)", text, _re.DOTALL)
                 if match:
                     records = _json.loads("[" + match.group(1) + "]")
                     if records and len(records) > 0:
